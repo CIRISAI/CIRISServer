@@ -116,7 +116,7 @@ requires-python = ">=3.10"
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
 dependencies = [
-    "ciris-client>=0.5.239,<0.6",
+    "ciris-client>=0.5.241,<0.6",
 ]
 
 [project.urls]

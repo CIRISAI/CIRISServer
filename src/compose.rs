@@ -314,6 +314,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // are software-tier must not meet a newly loadable TPM plugin (#783).
     crate::key_tier::apply_apple_store_defaults();
     crate::key_tier::pin_process_tier(&cfg.home);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        substrate = crate::substrate_line(),
+        "ciris-server starting"
+    );
 
     // SIGTERM handling for the life of the PROCESS, installed before anything
     // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`
@@ -2544,6 +2549,29 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Err(e) => tracing::debug!(error = %e, "founder_only rooms: not yet"),
                     }
                 }
+                // THE ROOMS' TAKEDOWNS (CC 4.5.3): a moderator's notice
+                // replicates like any signed row, and edge carries no purge
+                // plane, so every member's node applies the notices about its
+                // rooms itself (re-verified against its own state, idempotent),
+                // then hard-deletes what a closed window settles.
+                {
+                    let node = crate::node_key::wire_identity()
+                        .map_or_else(|| room_escape_node.clone(), str::to_owned);
+                    match crate::room_takedown::sweep(&engine_for_roster, &node).await {
+                        Ok(r) if r.finalized > 0 || r.waiting > 0 => tracing::debug!(
+                            seen = r.seen,
+                            applied = r.applied,
+                            waiting = r.waiting,
+                            finalized = r.finalized,
+                            "room takedowns: swept"
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "room takedowns: the sweep could not read the rooms — next tick"
+                        ),
+                    }
+                }
                 let guarded = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
                     crate::self_room_drive::drive_once(&drive_state),
                 ));
@@ -3155,13 +3183,19 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
         "app_name": "ciris",
         "aspects": ["edge"],
     });
-    let envelope = self_occurrence_envelope(
+    let mut envelope = self_occurrence_envelope(
         key_id,
         &tb_env,
         &enc.x25519_base64,
         &enc.ml_kem_768_base64,
         now,
     );
+    // A harness node's occurrence lapses with its identity (0.5.247). Signed in
+    // the envelope and mirrored on the typed row below; absent in production.
+    let valid_until = crate::identity_ttl::valid_until();
+    if let Some(v) = crate::identity_ttl::valid_until_str() {
+        envelope["valid_until"] = serde_json::Value::from(v);
+    }
 
     // Sign with the node's own hybrid identity (the build_self_key_record pattern);
     // attesting_key_id == identity_key_id == this node's registered key, so the
@@ -3203,7 +3237,7 @@ async fn publish_self_identity_occurrence(engine: &Arc<Engine>, edge: &Edge, cfg
         device_class: "agent".to_string(),
         hardware_attestation: None,
         asserted_at: now,
-        valid_until: None,
+        valid_until,
         encryption_pubkeys: Some(ciris_persist::federation::EncryptionPubkeys {
             x25519_base64: enc.x25519_base64.clone(),
             ml_kem_768_base64: enc.ml_kem_768_base64.clone(),
@@ -3880,7 +3914,7 @@ async fn register_substrate_key(
         identity,
         identity_type::SUBSTRATE_PERSIST,
         &valid_from,
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
         &[],
     )
     .await
@@ -4369,7 +4403,7 @@ pub(crate) async fn build_self_key_record(
         &identity,
         ciris_persist::federation::types::identity_type::NODE,
         &valid_from,
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
         &[],
     )
     .await
@@ -4449,6 +4483,10 @@ async fn setup_peer_replication(
     // grants the signer identity authored, and the empty topology then clobbered
     // the live one (envelopes_sent=0 under a fully green transport).
     let started = start_replication_runtime(engine, edge, edge.signer_key_id()).await;
+    // A newcomer gets this node's room keys at their seat, not at the next
+    // content write (CC C559, #874): the seat worker listens to edge's roster
+    // rows from here on.
+    crate::room_seat::start(engine, started.as_ref().ok().and_then(Option::as_ref));
 
     // RECEIVE AXIS (CIRISEdge#462 / CIRISServer#392) — once replication is up, ask
     // our peers for the OWNER's own testimony.

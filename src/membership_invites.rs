@@ -521,6 +521,7 @@ pub(crate) async fn widen_held_acceptances(
                     "membership: an accepted invitee seated (CIRISPersist#955)"
                 );
                 crate::compose::audience_changed(&group_key_id);
+                crate::room_seat::roster_changed(&group_key_id);
                 seated.push(member_key_id);
             }
             Ok(other) => tracing::debug!(

@@ -710,6 +710,63 @@ async fn releasing_a_node_also_revokes_its_occurrence_signed() {
     );
 }
 
+/// **A former owner's revocations cannot wipe a node someone else owns now**
+/// (CC 3.2; census risk 4, the steward's ruling 2026-11-13). Alice releases
+/// n2, and her occurrence for it is revoked. Then Bob owns n2. Before 0.5.247
+/// the release check asked every owner that ever bound the node, read Alice's
+/// revoked occurrence and erased Bob's node.
+#[tokio::test]
+async fn a_former_owners_release_does_not_wipe_the_current_owners_node() {
+    let alice = Person::new("rel-former").await;
+    let bob = Person::new("rel-current").await;
+    let n2 = second_node(&alice, 0xEA).await;
+    node_occurrence(&alice, &n2, 0xEB).await;
+    let (st, v) = alice
+        .as_owner("POST", &format!("/v1/self/nodes/{n2}/release"), None)
+        .await;
+    assert_eq!(st.as_u16(), 200, "{v}");
+    let dir = alice.engine.federation_directory();
+    let mine = std::slice::from_ref(&n2);
+    assert_eq!(
+        ciris_server::device_release::released_by_keys(dir.as_ref(), mine)
+            .await
+            .expect("released_by")
+            .map(|r| r.owner_key_id),
+        Some(alice.key().to_owned()),
+        "precondition: Alice's release is read while nobody owns n2"
+    );
+
+    // Bob's key is known here, and Bob binds n2.
+    dir.put_public_key(bob.owner.key_record())
+        .await
+        .expect("register Bob's fedID");
+    let scopes: Vec<String> = ciris_server::auth::ownership::OWNER_BINDING_INFRA_SCOPES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    ciris_server::auth::ownership::emit_steward_binding(
+        &alice.engine,
+        &bob.owner.signer().await,
+        &n2,
+        &scopes,
+    )
+    .await
+    .expect("Bob owner-binds n2");
+    assert_eq!(
+        owner_of(dir.as_ref(), &n2).await.expect("owner_of"),
+        Some(bob.key().to_owned()),
+        "precondition: Bob owns n2"
+    );
+
+    assert_eq!(
+        ciris_server::device_release::released_by_keys(dir.as_ref(), mine)
+            .await
+            .expect("released_by"),
+        None,
+        "Alice no longer owns n2; her revoked occurrence must not erase Bob's node"
+    );
+}
+
 /// **(iii) After an eviction, a new self file carries no wrap to the evicted
 /// device — and an OLD one still does** (the honesty half, CC 3.3.6.1: no DEK
 /// rotation, no re-encryption of what was already shared).

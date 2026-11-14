@@ -118,6 +118,11 @@ ignore = [
     "RUSTSEC-2026-0511",  # NXDOMAIN accepted for a proven empty non-terminal (DNSSEC)
     "RUSTSEC-2026-0512",  # unrelated signed RRset accepted as the answer (DNSSEC)
     "RUSTSEC-2026-0514",  # lookup returned records that failed DNSSEC validation
+    # edge v45.1.0 — three more hickory-proto DNSSEC-validation advisories, on the
+    # same grounds: no dnssec-* feature is built, so no validation runs here.
+    "RUSTSEC-2026-0530",  # parent-side NSEC at a zone cut accepted as nonexistence proof
+    "RUSTSEC-2026-0531",  # child-side NSEC/NSEC3 accepted as proof of no DS record
+    "RUSTSEC-2026-0532",  # parent-side NSEC3 at a zone cut accepted as nonexistence proof
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
     "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)

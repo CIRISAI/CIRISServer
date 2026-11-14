@@ -365,22 +365,22 @@ fn pin_tier_for(home: &Path) -> HomeTier {
 /// against the user's real home (CIRISAgent on 0.5.228). Read-only: the scan
 /// lists file NAMES under `identity/` and `keys/`; the only effect is
 /// `CIRIS_TPM_PLUGIN` in this process's environment.
-/// **The store's Apple-platform defaults** (0.5.246; edge's macos-15 probe,
-/// 2026-11-12, CIRISPersist#1261): on macOS, persist 61.2.2's read-only reader
-/// pool cannot open a file-backed store ("sqlite open readers: unable to open
-/// database file"), while the single writer connection can. Probed: readers = 0
-/// passes; mmap = 0, another temp directory and a raised file limit all still
-/// fail; the system SQLite CLI does the same sequence fine across processes. Until persist fixes the pool, an
-/// Apple host runs with no pool, the documented kill switch
-/// (`CIRIS_PERSIST_SQLITE_READERS=0`): reads go through the writer connection,
-/// the model persist ran before the pool existed, so the cost is concurrency
-/// only, never correctness. iOS is presumed affected (same SQLite build, a
-/// stricter sandbox). An operator's own setting always wins, and every other
-/// platform is untouched.
+/// **The store's iOS default** (0.5.246 on every Apple host; narrowed to iOS
+/// in 0.5.247). Persist 61.2.2's read-only reader pool could not open a
+/// file-backed store on Apple's SQLite ("sqlite open readers: unable to open
+/// database file", CIRISPersist#1261). Persist 61.4.0 fixes it: the writer
+/// now creates the WAL files before any reader opens, measured on macos-15. So
+/// macOS runs the pool again. iOS was never measured (no iOS runner reaches a
+/// file-backed store in CI), so it keeps the documented kill switch
+/// (`CIRIS_PERSIST_SQLITE_READERS=0`) until it is: reads go through the writer
+/// connection, the model persist ran before the pool existed, so the cost is
+/// concurrency only, never correctness. An operator's own setting always wins,
+/// and every other platform is untouched.
 ///
-/// Called before anything opens a store: at the Python import and at compose.
+/// Called before anything opens a store: in the binary's `main`, at the Python
+/// import and at compose.
 pub fn apply_apple_store_defaults() {
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(target_os = "ios")]
     {
         const READERS_ENV: &str = "CIRIS_PERSIST_SQLITE_READERS";
         if std::env::var_os(READERS_ENV).is_none() {
@@ -388,9 +388,9 @@ pub fn apply_apple_store_defaults() {
             // this crate spawns reads the environment.
             unsafe { std::env::set_var(READERS_ENV, "0") };
             tracing::warn!(
-                "store: the SQLite reader pool is OFF on this Apple host (persist 61.2.2's \
-                 pool cannot open a file-backed store on macOS); reads use the writer \
-                 connection. Set CIRIS_PERSIST_SQLITE_READERS to override."
+                "store: the SQLite reader pool is OFF on iOS until persist's pool is measured \
+                 there (history: CIRISPersist#1261); reads use the writer connection. Set \
+                 CIRIS_PERSIST_SQLITE_READERS to override."
             );
         }
     }

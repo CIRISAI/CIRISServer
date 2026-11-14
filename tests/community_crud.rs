@@ -436,8 +436,8 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
         .unwrap_or("majority")
         .to_owned();
     let community_id = ciris_edge::chat::new_room_community_key_id();
-    // Rooms seeded here test the machinery of rooms of three or more, which
-    // 0.5.246 closes in production (two people per room) and 0.6 re-opens.
+    // Rooms seeded here are founded directly; the limit is the route's (100
+    // since 0.5.247), lifted so no fixture depends on it.
     ciris_server::communities::lift_room_limit_for_tests(&community_id);
     let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .expect("ms instant");
@@ -731,6 +731,144 @@ async fn appoint_moderator(appointer: &Node, who: &Node) {
 /// both joiners from their KeyPackages, each joins from the Welcome addressed
 /// to them) without ever gating a send.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn approving_one_seat_decision_seats_only_that_person() {
+    // Kernel census, risk 1: before 0.5.247 an approval that met the room's
+    // rule widened EVERY accepted invite, so approving Bob also seated Carol.
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    // A room of one under `majority`: the founder's one signature meets the
+    // rule for the FIRST seat only. The old code widened the room's accepted
+    // invites in list order, so approving Carol seated Bob, and Carol's own
+    // widening was then refused (two members need two signatures).
+    let room = test_only_found(a, "one at a time", &[], json!({})).await;
+    for who in [b, c] {
+        contact(a, who).await;
+        let (s, v) = post(
+            a,
+            &format!("/v1/communities/{room}/invites"),
+            json!({ "key_id": who.owner.key_id }),
+        )
+        .await;
+        invited(s, &v);
+        let proposal = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+        let (s, v) = post(
+            who,
+            &format!("/v1/self/invites/{proposal}/accept"),
+            json!({}),
+        )
+        .await;
+        assert_eq!((s, v["state"].as_str()), (200, Some("accepted")), "{v}");
+    }
+    // Both acceptances are decisions for the founder; nobody is seated yet.
+    let (s, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    assert_eq!(s, 200, "{v}");
+    let items = v["decisions"].as_array().expect("decisions").clone();
+    assert_eq!(items.len(), 2, "{v}");
+    assert_eq!(fold(&a.engine, &room).await, sorted(&[&a.owner.key_id]));
+
+    let carols = items
+        .iter()
+        .find(|d| d["subject"] == c.owner.key_id.as_str())
+        .expect("Carol's decision");
+    let did = carols["decision_id"].as_str().expect("decision_id");
+    let (s, v) = post(
+        a,
+        &format!("/v1/self/decisions/{did}/answer"),
+        json!({ "answer": "approve" }),
+    )
+    .await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("applied")), "{v}");
+    assert_eq!(v["seated"], json!([c.owner.key_id]), "{v}");
+    assert_eq!(
+        fold(&a.engine, &room).await,
+        sorted(&[&a.owner.key_id, &c.owner.key_id]),
+        "approving Carol seats Carol, not Bob"
+    );
+    // The answer is the founder's, on the founder's own listing.
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    let left = v["decisions"].as_array().expect("decisions");
+    assert_eq!(left.len(), 1, "{v}");
+    assert_eq!(left[0]["subject"], b.owner.key_id.as_str());
+    assert_eq!(left[0]["my_answer"], Value::Null, "{v}");
+}
+
+/// **A seat a room's rule needs two voices for is approved in the mesh**
+/// (0.5.247; persist 61.4.0's cosign hold, CIRISPersist#1252). Before it, the
+/// second member's approval was process memory on one node and the invitee
+/// was never seated: the reason rooms were held to two people in 0.5.246.
+/// Alice's approval proposes the seat (persist holds it, short of the
+/// majority); Bob's, on his own node, signs the same event and the widening
+/// lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_members_approval_seats_the_invitee_by_cosignature() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "two voices", &[b], json!({})).await;
+    contact(a, c).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/invites"),
+        json!({ "key_id": c.owner.key_id }),
+    )
+    .await;
+    invited(s, &v);
+    let proposal = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+    let (s, v) = post(c, &format!("/v1/self/invites/{proposal}/accept"), json!({})).await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("accepted")), "{v}");
+    let find = |v: &Value| {
+        v["decisions"]
+            .as_array()
+            .expect("decisions")
+            .iter()
+            .find(|d| d["subject"] == c.owner.key_id.as_str())
+            .cloned()
+    };
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    let d = find(&v).expect("Carol's seat is Alice's decision");
+    assert_eq!(d["required"], 2, "{d}");
+    let did = d["decision_id"].as_str().expect("id").to_owned();
+    // Bob decides only once the inviter's act is held: no competing hold.
+    let (_, v) = get(b, &format!("/v1/self/decisions?circle={room}")).await;
+    assert!(
+        find(&v).is_none(),
+        "nothing for Bob before Alice proposes: {v}"
+    );
+    let answer = format!("/v1/self/decisions/{did}/answer");
+    let (s, v) = post(a, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!(
+        (s, v["state"].as_str()),
+        (202, Some("awaiting_members")),
+        "one voice of two holds the seat: {v}"
+    );
+    assert_eq!(v["signed"], 1, "{v}");
+    assert!(!fold(&a.engine, &room).await.contains(&c.owner.key_id));
+    // Alice again: one person, one voice.
+    let (s, v) = post(a, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!((s, v["signed"].as_u64()), (202, Some(1)), "{v}");
+
+    let (_, v) = get(b, &format!("/v1/self/decisions?circle={room}")).await;
+    let d = find(&v).expect("Carol's seat is Bob's decision too");
+    assert_eq!(d["decision_id"], did.as_str(), "one id on every node");
+    assert_eq!(
+        (d["signed"].as_u64(), &d["my_answer"]),
+        (Some(1), &Value::Null),
+        "{d}"
+    );
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    assert_eq!(find(&v).expect("still open")["my_answer"], "approve", "{v}");
+    let (s, v) = post(b, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!(
+        (s, v["state"].as_str()),
+        (200, Some("applied")),
+        "the second voice meets the majority: {v}"
+    );
+    assert_eq!(
+        fold(&a.engine, &room).await,
+        sorted(&[&a.owner.key_id, &b.owner.key_id, &c.owner.key_id])
+    );
+}
+
+#[tokio::test]
 async fn a_three_member_room_where_all_three_read_each_other() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
@@ -1243,6 +1381,71 @@ async fn a_widened_member_reads_the_rooms_messages_cirispersist_907() {
     assert_eq!(s, 200, "a widened member reads the transcript: {v}");
 }
 
+/// **#874: a member seated late reads every message written before their
+/// seat, with nobody writing again** (CC C559, persist 61.4.0's seat door,
+/// 0.5.247). Before it, the room's epoch keys reached a newcomer only through
+/// the next seal's grant emission, so Carol saw every earlier message
+/// unopened until Alice or Bob spoke. The server seats a newcomer when a
+/// roster row lands (`room_seat`); this fixture has no replication runtime, so
+/// it runs the same pass the worker runs, on each minter's node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_seated_late_reads_what_was_said_before_874() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "late joiner reads", &[b], json!({})).await;
+    let (s, v) = get(b, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "bob opens the room: {v}");
+    let said = ["before carol, from alice", "before carol, from bob"];
+    for (n, text) in [(a, said[0]), (b, said[1])] {
+        let (s, v) = post(
+            n,
+            &format!("/v1/chat/{room}/messages"),
+            json!({ "body": text }),
+        )
+        .await;
+        assert_eq!(s, 200, "send: {v}");
+    }
+    // Carol's node holds its content occurrence, as a booted node does from
+    // its self-room tick, before anyone seats her.
+    ciris_server::backend::provision_engine_occurrence(&c.engine, &c.owner.key_id)
+        .await
+        .expect("carol's content occurrence");
+    contact(a, c).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
+    // The seat: each minter's node gives Carol its current epoch key.
+    let carols = ciris_server::backend::content_occurrence_key_id(&c.engine)
+        .await
+        .expect("carol's occurrence key");
+    for n in [a, b] {
+        let granted = ciris_server::room_seat::seat_room(&n.engine, &room).await;
+        assert_eq!(
+            granted,
+            vec![carols.clone()],
+            "{}'s node grants its epoch to carol's device, and only hers",
+            n.owner.key_id
+        );
+    }
+    let (s, v) = get(c, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "{v}");
+    let mut bodies: Vec<&str> = v["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["body"].as_str().unwrap_or("<unopened>"))
+        .collect();
+    bodies.sort_unstable();
+    let mut want = said.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        bodies, want,
+        "carol reads both, and nobody wrote again: {v}"
+    );
+    // A second pass seats nobody new.
+    assert!(ciris_server::room_seat::seat_room(&a.engine, &room)
+        .await
+        .is_empty());
+}
+
 // ─── 5. The appointed moderator ─────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1533,6 +1736,102 @@ async fn the_author_appeals_a_flag_and_a_reviewer_rules() {
         (409, "moderation.nothing_to_appeal"),
         "{v}"
     );
+}
+
+/// **A takedown removes a message's body for everyone (CC 4.5.3), and an
+/// appeal can bring it back.** Alice founded the room and holds every duty;
+/// Bob moderates (flags) but holds no `takedown`; Carol wrote the message.
+/// Alice takes it down: no member reads the body, nothing reveals it, the row
+/// stays. Carol appeals; Bob cannot rule; Alice reverses and it reads again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_takedown_removes_the_body_and_a_reversed_appeal_restores_it() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "taken down", &[b, c], json!({})).await;
+    appoint_moderator(a, b).await;
+    let (s, v) = post(
+        c,
+        &format!("/v1/chat/{room}/messages"),
+        json!({ "body": "removed under the room's standards" }),
+    )
+    .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+    let item = |what: &str| format!("/v1/chat/{room}/items/{id}/{what}");
+    assert_eq!(
+        message_in(a, &room, &id).await["body"],
+        "removed under the room's standards"
+    );
+
+    // Bob holds `moderate`, not `takedown`; a takedown says why.
+    let (s, v) = post(b, &item("takedown"), json!({ "reason": "spam" })).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_moderator"), "{v}");
+    let (s, v) = post(a, &item("takedown"), json!({})).await;
+    assert_eq!(
+        (s, reason(&v)),
+        (400, "moderation.takedown_needs_reason"),
+        "{v}"
+    );
+
+    // Alice takes it down.
+    let (s, v) = post(a, &item("takedown"), json!({ "reason": "spam" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["withheld"], true, "{v}");
+    assert_eq!(
+        v["takedown"]["taken_down_by"],
+        a.owner.key_id.as_str(),
+        "{v}"
+    );
+    assert_eq!(v["takedown"]["legal_basis"], "community_standards", "{v}");
+    let notice = v["notice_attestation_id"]
+        .as_str()
+        .expect("notice")
+        .to_owned();
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert!(m.get("body").is_none(), "taken down for every member: {m}");
+        assert_eq!(m["unopened_reason"], "taken_down", "{m}");
+        assert_eq!(
+            m["takedown"]["notice_attestation_id"],
+            notice.as_str(),
+            "{m}"
+        );
+    }
+    // Nothing reveals a takedown.
+    let (s, v) = post(c, &item("reveal"), json!({})).await;
+    assert_ne!(s, 200, "a takedown is not revealed: {v}");
+    assert!(message_in(c, &room, &id).await.get("body").is_none());
+    // A second takedown signs nothing new.
+    let (s, v) = post(a, &item("takedown"), json!({ "reason": "again" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert!(v.get("notice_attestation_id").is_none(), "{v}");
+
+    // Carol appeals the takedown; Bob cannot rule.
+    let (s, v) = post(c, &item("reconsider"), json!({ "grounds": "new_evidence" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["appeal"], "filed", "{v}");
+    let (s, v) = post(b, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!((s, reason(&v)), (403, "moderation.not_a_reviewer"), "{v}");
+
+    // Alice reverses inside the window: the body reads again.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let (s, v) = post(a, &item("rule"), json!({ "outcome": "reversed" })).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(v["takedown"]["appeal"], "reversed", "{v}");
+    assert_eq!(v["takedown"]["withheld"], false, "{v}");
+    // Lifted for every member: no member reads it as taken down.
+    for n in [a, b, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_ne!(m["unopened_reason"], "taken_down", "{m}");
+        assert!(m["takedown"]["withheld"] == false, "{m}");
+    }
+    // The body reads again where it read before the takedown. Bob's body
+    // waits on his key grant, which this shared-store fixture does not drive
+    // (as in the flag test above); he read `not_granted` before it too.
+    for n in [a, c] {
+        let m = message_in(n, &room, &id).await;
+        assert_eq!(m["body"], "removed under the room's standards", "{m}");
+    }
 }
 
 // ─── 6. Roles, leaving, the last founder ────────────────────────────────────
@@ -2007,18 +2306,51 @@ async fn a_pair_rooms_roster_cannot_be_changed_here() {
 /// - Only the invitee answers (`membership.not_the_invitee`), only a founder
 ///   invites under `founder_only`, an expiry outside 1..=30 days is
 ///   `membership.bad_expiry`, and only the proposer withdraws.
-/// **Two people per room in 0.5.246** (Eric, 2026-11-11). A third person
-/// would accept and never be seated (members' approvals combine in the mesh
-/// only with CIRISPersist#1252, 0.6), so a room created through the route
-/// refuses the invitation that would make a third: an open invitation counts,
-/// a declined one does not.
+/// **A room past two says it is full** (`community.room_full`): the id every
+/// limit but two refuses with, so a lifted limit needs no new refusal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_room_holds_two_people_for_now() {
+async fn a_room_held_to_three_says_it_is_full() {
+    let nodes = mesh(4).await;
+    let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
+    let room = test_only_found(a, "three of us", &[b, c], json!({})).await;
+    ciris_server::communities::set_room_limit_for_tests(&room, 3);
+    contact(a, d).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/invites"),
+        json!({ "key_id": d.owner.key_id }),
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
+    assert_eq!(
+        (v["max_people"].as_u64(), v["members"].as_u64()),
+        (Some(3), Some(3)),
+        "{v}"
+    );
+}
+
+/// **A full room refuses the next seat** (`community.two_people_only` at two). 0.5.246
+/// held every room to two people; 0.5.247 seats up to
+/// `MAX_ROOM_PEOPLE` (100). The refusal is the same at any limit, so this
+/// room is held to two by a test override: an open invitation counts toward
+/// the limit, a declined one does not, and the change flow refuses too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_full_room_refuses_the_next_seat() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let (s, v) = post(a, "/v1/communities", json!({ "name": "two of us" })).await;
     assert_eq!(s, 201, "{v}");
     let room = v["community_id"].as_str().expect("id").to_owned();
+    let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
+    assert_eq!(
+        r["max_people"],
+        ciris_server::communities::MAX_ROOM_PEOPLE,
+        "a room says its limit: {r}"
+    );
+    // Any limit refuses alike; this room is held to two so three nodes
+    // reach it (at two the refusal keeps 0.5.246's `two_people_only`; the
+    // general `room_full` is asserted in a_room_held_to_three_says_it_is_full).
+    ciris_server::communities::set_room_limit_for_tests(&room, 2);
     let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
     assert_eq!(r["max_people"], 2, "the room says its limit: {r}");
     let (_, list) = get(a, "/v1/communities").await;

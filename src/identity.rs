@@ -902,7 +902,7 @@ pub async fn mint_portable_software_occurrence(
         &identity,
         "user",
         &now,
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
         &[],
     )
     .await

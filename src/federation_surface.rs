@@ -511,6 +511,12 @@ async fn get_metrics(State(st): State<SurfaceState>) -> Response {
                 // The plane that carries trace:*. Read THESE for carriage health;
                 // the four counters above observe the application plane only.
                 "replication_envelopes_served_total": replication_served,
+                // Edge v45.1 (seat load, 2026-11-13): rows and bytes moved per
+                // plane, `<kind>:<label>`. A row an initiator carries on its own
+                // push is counted here (`push_rows_out`) and not in the served
+                // total above, which counts Deliver answers only, so carriage is
+                // the two read together.
+                "replication_io": bundle.replication_io,
                 "withholds_by_reason": withholds,
                 "apply_refusals_by_kind": apply_refusals,
                 "replication_applied_total": applied,

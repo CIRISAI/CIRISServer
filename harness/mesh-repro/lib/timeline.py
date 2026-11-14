@@ -48,7 +48,7 @@ MILESTONES = [
     ("agent", "trace sealed", r"terminal outcome: .*sealed_and_persisted"),
     ("agent", "sweep promoted/widened rows", r"consent sweep: [1-9]|[1-9][0-9]* row\(s\) entered the mesh"),
     ("agent", "sweep: rows await their actor", r"await their actor"),
-    ("agent", "envelopes served (non-zero)", r"envelopes_served_total\":[1-9]"),
+    ("agent", "envelopes served (non-zero)", r"envelopes_served_total\":[1-9]|replication_rows_out\":[1-9]"),
     ("agent", "WARN: withheld", r" WARN .*withh[eo]ld"),
     ("agent", "WARN: refused / rejected", r" WARN .*(refus|reject)"),
     ("canonical", "read API bound (:4243)", r"read API up|lens read API listening"),

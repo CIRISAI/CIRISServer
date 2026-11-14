@@ -726,7 +726,7 @@ pub async fn register_key(
         identity_type,
         &ed_pub,
         Some(&pqc_pub),
-        None,
+        crate::identity_ttl::valid_until_str().as_deref(),
     )
     .map_err(Error::Envelope)?;
 
@@ -745,7 +745,7 @@ pub async fn register_key(
                 identity_type: identity_type.to_owned(),
                 identity_ref: key_id.to_owned(),
                 valid_from: now,
-                valid_until: None,
+                valid_until: crate::identity_ttl::valid_until(),
                 registration_envelope: envelope,
                 original_content_hash: hex::encode(Sha256::digest(&canonical)),
                 scrub_signature_classical: B64.encode(&sig.classical.signature),
