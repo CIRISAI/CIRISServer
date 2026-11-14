@@ -570,9 +570,18 @@ def main() -> int:
                 # (scenarios/traceflow.sh). It used to ride inside the 600-char
                 # dump below; edge v45.1's added counters pushed it past the cut
                 # and the rung read 0 on a run that landed every trace (0.5.247).
-                served = (m.get("data") or m).get("replication_envelopes_served_total") or {}
+                d = m.get("data") or m
+                served = d.get("replication_envelopes_served_total") or {}
                 total = sum(v for v in served.values() if isinstance(v, int)) if isinstance(served, dict) else served
-                log("[DELIVERY-STATUS] " + _json.dumps({"envelopes_served_total": total, "by_kind": served},
+                # Edge v45.1 carries an initiator's rows on its own push, which
+                # the served total (Deliver answers only) does not count; its
+                # `replication_io` does, per plane.
+                io = d.get("replication_io") or {}
+                rows_out = sum(v for k, v in io.items() if isinstance(v, int)
+                               and k.endswith((":deliver_rows_out", ":push_rows_out")))
+                log("[DELIVERY-STATUS] " + _json.dumps({"envelopes_served_total": total,
+                                                        "replication_rows_out": rows_out,
+                                                        "by_kind": served},
                                                        separators=(",", ":")) + " " + _json.dumps(m)[:600])
             except Exception as e:  # noqa: BLE001
                 log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")

@@ -110,7 +110,10 @@ EXIT_converge=13
 # tests/delivery_round_diagnostics.rs pins that this probe names a field the
 # server actually emits: a probe matching nothing and a probe matching zero read
 # the same, which is how this rung went blind in the first place.
-stage_ship() { harness_log_count agent '"envelopes_served_total":[1-9]'; }
+# Edge v45.1 (0.5.247): an initiator's rows ride its own push, counted in
+# `replication_io` (`push_rows_out`) and not in the served total, which counts
+# Deliver answers only. Rows out on either is carriage.
+stage_ship() { harness_log_count agent '"envelopes_served_total":[1-9]|"replication_rows_out":[1-9]'; }
 HINT_ship="rounds ran but carried nothing. Read round_diagnostics.replication_plane: carriage.standing separates 'idle' (nothing owed) from 'not_exercised' (no round finished) from 'withholding' (this node REFUSED — withholds.by_reason names the branch). If withholding, check the serve gate (#379/#386 legs A+B: role on the key record AND the delegates_to trust-root walk) and covers_trace in the trace_plane diagnostic."
 EXIT_ship=14
 DIAG_ship() {
