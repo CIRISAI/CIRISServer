@@ -738,6 +738,9 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "moderation.nothing_to_take_down",
     "moderation.takedown_failed",
     "moderation.takedown_needs_reason",
+    # LARGE ROOMS (0.5.247): a full room's refusal, which replaces
+    # `community.two_people_only` (rooms seat up to 100 people). Queued the same way.
+    "community.room_full",
     # PAID AT CLIENT 0.5.241 (2026-11-13, for 0.5.247): the 0.5.246 queue —
     # the decisions queue, the member calls, room moderation, appeals and two
     # people per room — 28 ids, in all 29 languages; the floor in

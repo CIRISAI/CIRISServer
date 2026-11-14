@@ -1743,35 +1743,64 @@ struct InviteRequest {
     expires_in_days: Option<i64>,
 }
 
-/// The most people a room seats in 0.5.246 (Eric, 2026-11-11), until members'
-/// approvals combine in the mesh (CIRISPersist#1252, 0.6).
-pub const MAX_ROOM_PEOPLE: usize = 2;
+/// The most people a room seats (0.5.247; Eric 2026-11-13, "large rooms and
+/// moderation while we wait for the refactor"). 0.5.246 held rooms to two
+/// people until a newcomer could read the room's history at their seat and a
+/// room's approvals combined in the mesh; persist 61.4.0 carries both (CC
+/// C559's seat door, CIRISPersist#1252's cosign rows). The bound is the mesh
+/// the LTS line serves (edge v45.1.0: at most 100 nodes): a room cannot hold
+/// more people than the mesh holds nodes.
+pub const MAX_ROOM_PEOPLE: usize = 100;
 
-/// Rooms a TEST has lifted the two-people limit for, by id. The tests of
-/// rooms of three or more keep the machinery 0.6 re-opens honest; no
-/// production path ever adds to this set.
-fn rooms_above_two() -> &'static std::sync::Mutex<BTreeSet<String>> {
-    static R: std::sync::OnceLock<std::sync::Mutex<BTreeSet<String>>> = std::sync::OnceLock::new();
+/// Per-room limits a TEST set, by id: `Some(n)` holds that room to `n`
+/// people, `None` lifts the limit. No production path writes here.
+fn room_limit_overrides() -> &'static std::sync::Mutex<BTreeMap<String, Option<usize>>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, Option<usize>>>> =
+        std::sync::OnceLock::new();
     R.get_or_init(Default::default)
 }
 
-/// The room's people limit as the room JSON reports it: [`MAX_ROOM_PEOPLE`],
-/// or `None` (no limit) for a room a test lifted.
+/// The room's people limit: [`MAX_ROOM_PEOPLE`], or a test's override for
+/// it (`None` = no limit).
 fn max_people_of(room_id: &str) -> Option<usize> {
-    (!rooms_above_two()
+    room_limit_overrides()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(room_id))
-    .then_some(MAX_ROOM_PEOPLE)
+        .get(room_id)
+        .copied()
+        .unwrap_or(Some(MAX_ROOM_PEOPLE))
 }
 
-/// Lift [`MAX_ROOM_PEOPLE`] for ONE room, in a test of larger rooms.
+/// Lift the people limit for ONE room, in a test.
 #[doc(hidden)]
 pub fn lift_room_limit_for_tests(room_id: &str) {
-    rooms_above_two()
+    room_limit_overrides()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(room_id.to_owned());
+        .insert(room_id.to_owned(), None);
+}
+
+/// Hold ONE room to `max` people, in a test of the full-room refusal.
+#[doc(hidden)]
+pub fn set_room_limit_for_tests(room_id: &str, max: usize) {
+    room_limit_overrides()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(room_id.to_owned(), Some(max));
+}
+
+/// The refusal a full room answers with, at either door.
+fn room_full(max: usize, members: usize, open: usize) -> Response {
+    refuse_with(
+        StatusCode::CONFLICT,
+        "community.room_full",
+        "This room is full.",
+        serde_json::json!({
+            "max_people": max,
+            "members": members,
+            "open_invitations": open,
+        }),
+    )
 }
 
 /// `POST /v1/communities/{id}/invites` — invite `key_id` into the room.
@@ -1843,21 +1872,10 @@ async fn invite(
             .count(),
         Err(e) => return store_unavailable(format!("group_invites: {e}")),
     };
-    let lifted = rooms_above_two()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(room.id());
-    if !lifted && active.len() + open >= MAX_ROOM_PEOPLE {
-        return refuse_with(
-            StatusCode::CONFLICT,
-            "community.two_people_only",
-            "A room holds two people for now.",
-            serde_json::json!({
-                "max_people": MAX_ROOM_PEOPLE,
-                "members": active.len(),
-                "open_invitations": open,
-            }),
-        );
+    if let Some(max) = max_people_of(room.id()) {
+        if active.len() + open >= max {
+            return room_full(max, active.len(), open);
+        }
     }
     let protocol = room.record.consensus_protocol.clone();
     if Protocol::parse(&protocol) == Some(Protocol::FounderOnly) && !room.is_founder(&owner.key_id)
@@ -2271,24 +2289,11 @@ async fn change_envelope(
     if let Err(r) = precheck(&st, &owner, &room, &op).await {
         return r;
     }
-    // TWO PEOPLE PER ROOM (0.5.246): an `add` that would seat a third person
-    // is refused here as at the invite route.
-    if matches!(op, ChangeOp::Add { .. }) && room.roster.len() >= MAX_ROOM_PEOPLE {
-        let lifted = rooms_above_two()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(room.id());
-        if !lifted {
-            return refuse_with(
-                StatusCode::CONFLICT,
-                "community.two_people_only",
-                "A room holds two people for now.",
-                serde_json::json!({
-                    "max_people": MAX_ROOM_PEOPLE,
-                    "members": room.roster.len(),
-                    "open_invitations": 0,
-                }),
-            );
+    // A FULL ROOM: an `add` past the room's limit is refused here as at the
+    // invite route.
+    if let (ChangeOp::Add { .. }, Some(max)) = (&op, max_people_of(room.id())) {
+        if room.roster.len() >= max {
+            return room_full(max, room.roster.len(), 0);
         }
     }
     // CONSENT TO JOIN: M of N members cannot stand in for the joiner — and
@@ -2486,6 +2491,176 @@ fn my_answers() -> &'static std::sync::Mutex<BTreeMap<AnswerKey, &'static str>> 
     A.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
 }
 
+/// What an approval did to a seat that needs more than one voice.
+enum CosignedSeat {
+    /// The room's rule is met: the widening landed and the person is seated.
+    Landed,
+    /// Held in the mesh (persist's cosign hold): `signers` voices so far.
+    Held { signers: usize },
+}
+
+/// The open hold on seating `member` in `room`, if this node holds one: its
+/// quorum key, proposer and event.
+async fn open_seat_hold(
+    dir: &dyn FederationDirectory,
+    room: &str,
+    member: &str,
+) -> Result<
+    Option<(
+        String,
+        String,
+        ciris_persist::federation::group_plane::GroupSigned,
+    )>,
+    String,
+> {
+    use ciris_persist::federation::{cosign, group_plane::GroupSigned};
+    let open = dir
+        .list_open_cosign_receipts()
+        .await
+        .map_err(|e| format!("list_open_cosign_receipts: {e:#}"))?;
+    for r in open.into_iter().filter(|r| r.group_key_id == room) {
+        let Some(row) = dir
+            .get_attestation(&r.quorum_key)
+            .await
+            .map_err(|e| format!("get_attestation({}): {e:#}", r.quorum_key))?
+        else {
+            continue;
+        };
+        let Ok(Some(read)) = cosign::read_row(&row) else {
+            continue;
+        };
+        if let GroupSigned::CommunityWidening(w) = &read.event {
+            if w.community_membership_widening.member_key_id == member {
+                return Ok(Some((r.quorum_key, r.proposer_key_id, read.event)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// **An approval of a seat, signed into the mesh** (0.5.247; persist 61.4.0's
+/// cosign hold, CIRISPersist#1252, CC 3.3.4). The first approver proposes:
+/// their widening goes to persist's local door, which holds it short of the
+/// room's rule and mints the `cosign:pending:v1` row every member's node
+/// receives. A later approver signs that same event with their own pen and
+/// writes it as a `cosign:signature:v1` row. Persist's executor assembles the
+/// widening wherever the signatures meet the rule; it lands as the ordinary
+/// row. One person, one voice: a second approval by the proposer or a signer
+/// adds nothing.
+async fn cosign_seat(
+    st: &ChatState,
+    headers: &HeaderMap,
+    owner: &Owner,
+    item: &serde_json::Value,
+) -> Result<CosignedSeat, Response> {
+    use ciris_persist::federation::{cosign, group_plane::GroupSigned};
+    let room_id = item["circle"].as_str().unwrap_or_default().to_owned();
+    let member = item["subject"].as_str().unwrap_or_default().to_owned();
+    let room = load_room_as_member(st, owner, &room_id).await?;
+    let dir = st.engine.federation_directory();
+    let pen = pen(st, headers, owner).await?;
+    let seated = |dir: std::sync::Arc<dyn FederationDirectory>, room: String, member: String| async move {
+        dir.active_community_members(&room)
+            .await
+            .is_ok_and(|ms| ms.iter().any(|m| m.key_id == member))
+    };
+    let held = open_seat_hold(dir.as_ref(), room.id(), &member)
+        .await
+        .map_err(store_unavailable)?;
+    let Some((quorum_key, proposer, event)) = held else {
+        // No hold yet: only the inviter proposes (the listing shows the
+        // decision to nobody else until the hold is here).
+        if item["proposed_by"].as_str() != Some(owner.key_id.as_str()) {
+            return Err(refuse(
+                StatusCode::NOT_FOUND,
+                "decisions.not_found",
+                "That decision isn't open for you any more.",
+            ));
+        }
+        // This approver proposes. Their widening of THIS
+        // decision's invite reaches persist's local door, which seats at once
+        // where one voice meets the rule and otherwise holds it.
+        let active: std::collections::HashSet<String> =
+            room.roster.iter().map(|m| m.key_id.clone()).collect();
+        let invites = crate::membership_invites::group_invites(
+            dir.as_ref(),
+            room.tier.group_scope(),
+            room.id(),
+            &active,
+        )
+        .await
+        .map_err(|e| store_unavailable(format!("group_invites: {e}")))?;
+        let this: Vec<_> = invites
+            .into_iter()
+            .filter(|(v, _)| seat_decision_id(&v.proposal_id) == item["decision_id"])
+            .collect();
+        let widener = ciris_edge::membership::MembershipWidener::new(vec![std::sync::Arc::clone(
+            pen.edge_signer(),
+        )]);
+        crate::membership_invites::widen_held_acceptances(dir.as_ref(), &this, &widener).await;
+        if seated(std::sync::Arc::clone(&dir), room_id.clone(), member.clone()).await {
+            return Ok(CosignedSeat::Landed);
+        }
+        return match open_seat_hold(dir.as_ref(), room.id(), &member)
+            .await
+            .map_err(store_unavailable)?
+        {
+            Some(_) => Ok(CosignedSeat::Held { signers: 1 }),
+            None => Err(write_failed(
+                "the seat could not be proposed: persist neither seated nor held it \
+                 (another open proposal of yours in this room, or the invitee's acceptance \
+                 is not held here yet)",
+            )),
+        };
+    };
+    let signer = pen.key_id().to_owned();
+    let mut signers: Vec<String> = dir
+        .list_cosign_signatures(&quorum_key)
+        .await
+        .map_err(|e| store_unavailable(format!("list_cosign_signatures: {e:#}")))?
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect();
+    signers.push(proposer.clone());
+    if signers.iter().any(|k| *k == signer || *k == owner.key_id) {
+        return Ok(CosignedSeat::Held {
+            signers: signers.len(),
+        });
+    }
+    let GroupSigned::CommunityWidening(w) = &event else {
+        return Err(write_failed("the held seat is not a widening"));
+    };
+    let ev = &w.community_membership_widening;
+    // The same builder, the same instant and role: the cosignature is over the
+    // bytes the proposer signed (the signer is not in them).
+    let (_, spec) = ciris_edge::community_roster::community_membership_widening(
+        dir.as_ref(),
+        room.id(),
+        &member,
+        ev.role.as_deref(),
+        ev.joined_at,
+        pen.edge_signer(),
+    )
+    .await
+    .map_err(write_failed)?;
+    let cosignature = ciris_persist::federation::types::RosterCosignature {
+        authority_key_id: spec.authority_key_id,
+        scrub_signature_classical: spec.scrub_signature_classical,
+        scrub_signature_pqc: spec.scrub_signature_pqc,
+    };
+    let row = cosign::signature_row(&event, &cosignature)
+        .map_err(|e| write_failed(format!("cosign signature row: {e:#}")))?;
+    dir.put_attestation(ciris_persist::federation::SignedAttestation { attestation: row })
+        .await
+        .map_err(|e| write_failed(format!("put cosign signature: {e:#}")))?;
+    if seated(std::sync::Arc::clone(&dir), room_id, member).await {
+        return Ok(CosignedSeat::Landed);
+    }
+    Ok(CosignedSeat::Held {
+        signers: signers.len() + 1,
+    })
+}
+
 /// The id of a seat decision: stable across nodes, from the proposal row.
 fn seat_decision_id(proposal_id: &str) -> String {
     format!("quorum_cosign:{proposal_id}")
@@ -2540,6 +2715,38 @@ async fn seat_decisions(
                 continue;
             }
             let did = seat_decision_id(&v.proposal_id);
+            // A seat that needs more than one voice is one held act in the
+            // mesh (persist's cosign hold), named by its proposer: the
+            // inviter. Another member decides only once that act is held on
+            // their node, so no approval opens a competing hold. Who signed
+            // it is the durable answer.
+            let mut signed_by: Vec<String> = Vec::new();
+            if t.required > 1 {
+                match open_seat_hold(dir.as_ref(), room.id(), &v.invitee_key_id)
+                    .await
+                    .map_err(store_unavailable)?
+                {
+                    Some((quorum_key, proposer, _)) => {
+                        signed_by = dir
+                            .list_cosign_signatures(&quorum_key)
+                            .await
+                            .map_err(|e| {
+                                store_unavailable(format!("list_cosign_signatures: {e:#}"))
+                            })?
+                            .into_iter()
+                            .map(|(k, _)| k)
+                            .collect();
+                        signed_by.push(proposer);
+                    }
+                    None if owner.key_id != v.proposer_key_id => continue,
+                    None => {}
+                }
+            }
+            let my_answer = if signed_by.contains(&owner.key_id) {
+                Some("approve")
+            } else {
+                answers.get(&(owner.key_id.clone(), did.clone())).copied()
+            };
             out.push(serde_json::json!({
                 "decision_id": did,
                 "kind": "quorum_cosign",
@@ -2553,7 +2760,8 @@ async fn seat_decisions(
                 "consensus_protocol": t.protocol,
                 "required": t.required,
                 "eligible": t.eligible,
-                "my_answer": answers.get(&(owner.key_id.clone(), did.clone())).copied(),
+                "my_answer": my_answer,
+                "signed": signed_by.len(),
                 "reason_id": "decisions.quorum_cosign.approve_joining",
                 "says": "Approve this person joining the room.",
             }));
@@ -2803,6 +3011,41 @@ async fn answer_decision(
                         .into_response();
                 }
             }
+        }
+    }
+    // A room whose rule needs more than this one voice (0.5.247, persist 61.4.0,
+    // CIRISPersist#1252): the approval is a SIGNED cosignature on the seat,
+    // held in the mesh until the room's rule is met, never process memory.
+    if answer == "approve" {
+        match cosign_seat(&st, &headers, &owner, &item).await {
+            Ok(CosignedSeat::Landed) => {
+                crate::compose::wrote_rows("decisions: a member seated by cosignature");
+                crate::room_seat::roster_changed(item["circle"].as_str().unwrap_or_default());
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "decision_id": decision_id, "answer": answer, "state": "applied",
+                        "seated": [item["subject"].clone()],
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(CosignedSeat::Held { signers }) => {
+                crate::compose::wrote_rows("decisions: a seat cosigned");
+                return refuse_with(
+                    StatusCode::ACCEPTED,
+                    "decisions.awaiting_members",
+                    "Your answer is recorded. The other members still need to approve before this takes effect.",
+                    serde_json::json!({
+                        "decision_id": decision_id,
+                        "answer": answer,
+                        "state": "awaiting_members",
+                        "required": item["required"],
+                        "signed": signers,
+                    }),
+                );
+            }
+            Err(r) => return r,
         }
     }
     refuse_with(

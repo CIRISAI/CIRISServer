@@ -436,8 +436,8 @@ async fn test_only_found(founder: &Node, name: &str, members: &[&Node], extra: V
         .unwrap_or("majority")
         .to_owned();
     let community_id = ciris_edge::chat::new_room_community_key_id();
-    // Rooms seeded here test the machinery of rooms of three or more, which
-    // 0.5.246 closes in production (two people per room) and 0.6 re-opens.
+    // Rooms seeded here are founded directly; the limit is the route's (100
+    // since 0.5.247), lifted so no fixture depends on it.
     ciris_server::communities::lift_room_limit_for_tests(&community_id);
     let founded_at = chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
         .expect("ms instant");
@@ -790,6 +790,82 @@ async fn approving_one_seat_decision_seats_only_that_person() {
     assert_eq!(left.len(), 1, "{v}");
     assert_eq!(left[0]["subject"], b.owner.key_id.as_str());
     assert_eq!(left[0]["my_answer"], Value::Null, "{v}");
+}
+
+/// **A seat a room's rule needs two voices for is approved in the mesh**
+/// (0.5.247; persist 61.4.0's cosign hold, CIRISPersist#1252). Before it, the
+/// second member's approval was process memory on one node and the invitee
+/// was never seated: the reason rooms were held to two people in 0.5.246.
+/// Alice's approval proposes the seat (persist holds it, short of the
+/// majority); Bob's, on his own node, signs the same event and the widening
+/// lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_members_approval_seats_the_invitee_by_cosignature() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "two voices", &[b], json!({})).await;
+    contact(a, c).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/invites"),
+        json!({ "key_id": c.owner.key_id }),
+    )
+    .await;
+    invited(s, &v);
+    let proposal = v["proposal_id"].as_str().expect("proposal_id").to_owned();
+    let (s, v) = post(c, &format!("/v1/self/invites/{proposal}/accept"), json!({})).await;
+    assert_eq!((s, v["state"].as_str()), (200, Some("accepted")), "{v}");
+    let find = |v: &Value| {
+        v["decisions"]
+            .as_array()
+            .expect("decisions")
+            .iter()
+            .find(|d| d["subject"] == c.owner.key_id.as_str())
+            .cloned()
+    };
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    let d = find(&v).expect("Carol's seat is Alice's decision");
+    assert_eq!(d["required"], 2, "{d}");
+    let did = d["decision_id"].as_str().expect("id").to_owned();
+    // Bob decides only once the inviter's act is held: no competing hold.
+    let (_, v) = get(b, &format!("/v1/self/decisions?circle={room}")).await;
+    assert!(
+        find(&v).is_none(),
+        "nothing for Bob before Alice proposes: {v}"
+    );
+    let answer = format!("/v1/self/decisions/{did}/answer");
+    let (s, v) = post(a, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!(
+        (s, v["state"].as_str()),
+        (202, Some("awaiting_members")),
+        "one voice of two holds the seat: {v}"
+    );
+    assert_eq!(v["signed"], 1, "{v}");
+    assert!(!fold(&a.engine, &room).await.contains(&c.owner.key_id));
+    // Alice again: one person, one voice.
+    let (s, v) = post(a, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!((s, v["signed"].as_u64()), (202, Some(1)), "{v}");
+
+    let (_, v) = get(b, &format!("/v1/self/decisions?circle={room}")).await;
+    let d = find(&v).expect("Carol's seat is Bob's decision too");
+    assert_eq!(d["decision_id"], did.as_str(), "one id on every node");
+    assert_eq!(
+        (d["signed"].as_u64(), &d["my_answer"]),
+        (Some(1), &Value::Null),
+        "{d}"
+    );
+    let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
+    assert_eq!(find(&v).expect("still open")["my_answer"], "approve", "{v}");
+    let (s, v) = post(b, &answer, json!({ "answer": "approve" })).await;
+    assert_eq!(
+        (s, v["state"].as_str()),
+        (200, Some("applied")),
+        "the second voice meets the majority: {v}"
+    );
+    assert_eq!(
+        fold(&a.engine, &room).await,
+        sorted(&[&a.owner.key_id, &b.owner.key_id, &c.owner.key_id])
+    );
 }
 
 #[tokio::test]
@@ -2230,18 +2306,27 @@ async fn a_pair_rooms_roster_cannot_be_changed_here() {
 /// - Only the invitee answers (`membership.not_the_invitee`), only a founder
 ///   invites under `founder_only`, an expiry outside 1..=30 days is
 ///   `membership.bad_expiry`, and only the proposer withdraws.
-/// **Two people per room in 0.5.246** (Eric, 2026-11-11). A third person
-/// would accept and never be seated (members' approvals combine in the mesh
-/// only with CIRISPersist#1252, 0.6), so a room created through the route
-/// refuses the invitation that would make a third: an open invitation counts,
-/// a declined one does not.
+/// **A full room refuses the next seat** (`community.room_full`). 0.5.246
+/// held every room to two people; 0.5.247 seats up to
+/// `MAX_ROOM_PEOPLE` (100). The refusal is the same at any limit, so this
+/// room is held to two by a test override: an open invitation counts toward
+/// the limit, a declined one does not, and the change flow refuses too.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_room_holds_two_people_for_now() {
+async fn a_full_room_refuses_the_next_seat() {
     let nodes = mesh(3).await;
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
     let (s, v) = post(a, "/v1/communities", json!({ "name": "two of us" })).await;
     assert_eq!(s, 201, "{v}");
     let room = v["community_id"].as_str().expect("id").to_owned();
+    let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
+    assert_eq!(
+        r["max_people"],
+        ciris_server::communities::MAX_ROOM_PEOPLE,
+        "a room says its limit (0.5.247: 100): {r}"
+    );
+    // The refusal is the same at any limit; this room is held to two so
+    // three nodes reach it.
+    ciris_server::communities::set_room_limit_for_tests(&room, 2);
     let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
     assert_eq!(r["max_people"], 2, "the room says its limit: {r}");
     let (_, list) = get(a, "/v1/communities").await;
@@ -2259,7 +2344,7 @@ async fn a_room_holds_two_people_for_now() {
     invited(s, &v);
     let bob_p = v["proposal_id"].as_str().unwrap().to_owned();
     let (s, v) = invite(c).await;
-    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
     assert_eq!(v["max_people"], 2, "{v}");
     assert_eq!(v["open_invitations"], 1, "{v}");
     // Bob declines: his invitation no longer holds the seat.
@@ -2274,7 +2359,7 @@ async fn a_room_holds_two_people_for_now() {
     let _ = get(a, &format!("/v1/communities/{room}/invites")).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     let (s, v) = invite(b).await;
-    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
     assert_eq!(v["members"], 2, "{v}");
     // The carried change refuses a third seat too — past the contact gate.
     contact(a, b).await;
@@ -2284,7 +2369,7 @@ async fn a_room_holds_two_people_for_now() {
         json!({ "op": "add", "key_id": b.owner.key_id }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
     assert_eq!(v["members"], 2, "{v}");
 }
 

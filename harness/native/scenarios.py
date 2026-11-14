@@ -3586,25 +3586,38 @@ BIG ROOM — {n_people} people join one room one by one; each newcomer reads the
             (r["proposal_id"] for r in m.must("GET", "/v1/self/invites").get("invites", [])
              if r.get("group_id") == room), None), args.arrive_wait, every=2)
         m.must("POST", f"/v1/self/invites/{pid}/accept", {})
-        others = [x for x in seated if x is not a]
-        if others:
-            env = a.must("POST", f"/v1/communities/{room}/changes/envelope",
-                         {"op": "add", "key_id": m.owner_key_id})
-            sigs = list(env.get("signatures") or [])
-            for o in others:
-                sigs.append(o.must("POST", f"/v1/communities/{room}/changes/cosign",
-                                   {"change_envelope": env["change_envelope"]})["signature"])
+        # Every seated member approves on THEIR node through the decisions
+        # queue, as the client does. The inviter's approval (or its node's
+        # sweep) proposes the seat; persist holds it short of the majority and
+        # the others' approvals are cosignature rows (CIRISPersist#1252).
+        for x in list(seated):
+            def decision(x: Node = x) -> Optional[Dict[str, Any]]:
+                st, body = x.api("GET", f"/v1/self/decisions?circle={room}")
+                items = (body or {}).get("decisions") or [] if isinstance(body, dict) else []
+                hit = next((d for d in items if d.get("subject") == m.owner_key_id), None)
+                if hit is None:
+                    _, view = a.api("GET", f"/v1/communities/{room}")
+                    ms = (view or {}).get("members") or [] if isinstance(view, dict) else []
+                    if any(m.owner_key_id in json.dumps(y) for y in ms):
+                        return {"seated": True}
+                return hit
 
-            def assembled() -> Optional[Any]:
-                code, body = a.api("POST", f"/v1/communities/{room}/changes/assemble",
-                                   {"change_envelope": env["change_envelope"], "signatures": sigs})
-                if code in (200, 201, 202):
-                    return body
-                if isinstance(body, dict) and body.get("reason_id") == "membership.awaiting_acceptance":
-                    return None
-                raise MeshError(f"assemble for {m.name} answered {code}: {body}")
-
-            wait_for(f"alice to assemble {m.name}'s seat", assembled, args.arrive_wait * 2, every=2)
+            d = wait_for(f"{x.name} to see 'approve {m.name} joining'", decision,
+                         args.arrive_wait * 2, every=2)
+            if d.get("seated"):
+                break
+            if d.get("my_answer") == "approve":
+                continue
+            st, ans = x.api("POST", f"/v1/self/decisions/{d['decision_id']}/answer",
+                            {"answer": "approve"})
+            step(f"approved:{m.name}:by:{x.name}", status=st,
+                 state=(ans or {}).get("state") if isinstance(ans, dict) else None,
+                 signed=(ans or {}).get("signed") if isinstance(ans, dict) else None,
+                 required=d.get("required"))
+            if st == 200:
+                break
+            if st != 202:
+                raise MeshError(f"{x.name}'s approval of {m.name} answered {st}: {ans}")
 
         def is_seated() -> Optional[bool]:
             a.api("GET", f"/v1/communities/{room}/invites")

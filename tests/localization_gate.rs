@@ -865,7 +865,9 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// 47 -> 50 for 0.5.247: the room takedown's
     /// `moderation.{nothing_to_take_down,takedown_failed,takedown_needs_reason}`
     /// — same reason, same list, queued with their English for the client.
-    const MAX_UNCOVERED: usize = 50;
+    /// 50 -> 51: `community.room_full` (rooms seat up to 100 people; it
+    /// replaces `community.two_people_only`, which the client already paid).
+    const MAX_UNCOVERED: usize = 51;
 
     let en = load_en();
     let ids = scraped_server_ids();
