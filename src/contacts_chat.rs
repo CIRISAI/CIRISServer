@@ -7566,10 +7566,16 @@ mod tests {
             assert_eq!(detail, d(), "the detail is the substrate's own sentence");
             seen.insert(token);
         }
-        // Edge's arms, plus the one word that is the server's own: a body that
-        // opened and the room's moderator withheld (`room_moderation`).
-        assert!(!seen.contains(UNOPENED_WITHHELD));
-        seen.insert(UNOPENED_WITHHELD);
+        // Edge's arms, plus the two words that are the server's own: a body
+        // that opened and the room's moderator withheld (`room_moderation`),
+        // and one a moderator took down (`room_takedown`, 0.5.247).
+        for own in [UNOPENED_WITHHELD, UNOPENED_TAKEN_DOWN] {
+            assert!(
+                !seen.contains(own),
+                "`{own}` is the server's, not an edge arm's"
+            );
+            seen.insert(own);
+        }
         assert_eq!(
             seen.len(),
             UNOPENED_REASONS.len(),
