@@ -242,6 +242,9 @@ pub const BYTE_STATES: &[&str] = &[
     "evicted",
     "seal_mismatch",
     "unopened",
+    // CC 4.5.3: a room moderator took the bytes down (a tombstone persist
+    // honours at every read door). Not the viewer's to reveal.
+    "taken_down",
 ];
 
 #[derive(Debug, Serialize)]
@@ -292,6 +295,11 @@ pub struct DriveEntry {
     /// `drive.withheld_by_moderation` until the viewer reveals it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub moderation: Option<crate::room_moderation::ModerationView>,
+    /// **What the room did to this file's bytes** (CC 4.5.3;
+    /// [`crate::room_takedown`]): present once a moderator took them down.
+    /// While `withheld`, `bytes` is `taken_down` and nothing reveals them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takedown: Option<crate::room_takedown::TakedownView>,
 }
 
 /// The room's moderation decision about `attestation_id`, for `viewer`. Only a
@@ -1783,6 +1791,7 @@ fn blob_state(e: &BlobError) -> ByteState {
         BlobError::Withdrawn { .. } => "withdrawn",
         BlobError::Evicted { .. } => "evicted",
         BlobError::SealDidNotOpen { .. } => "seal_mismatch",
+        BlobError::Purged { .. } => "taken_down",
         _ => "substrate",
     };
     ByteState::Absent {
@@ -2377,6 +2386,7 @@ async fn read_drive(
     let content = store(&st.engine);
     let mut out = Vec::with_capacity(rows.len());
     let mut moderation_duties = crate::room_moderation::DutyCache::default();
+    let mut takedown_notices = crate::room_takedown::NoticeCache::default();
     for (cohort, room_id, file) in rows {
         let withdrawn = match withdrawn_by(&st, &file.attestation_id).await {
             Ok(w) => w,
@@ -2438,6 +2448,28 @@ async fn read_drive(
         } else {
             None
         };
+        let takedown = if cohort == ciris_persist::federation::types::cohort_scope::COMMUNITY {
+            match crate::room_takedown::view_of(
+                &st.engine,
+                &mut takedown_notices,
+                &room_id,
+                &file.attesting_key_id,
+                &file.pointer.content_sha256,
+            )
+            .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    return refuse(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "drive.listing_failed",
+                        format!("read the room's takedowns of {}: {e}", file.attestation_id),
+                    )
+                }
+            }
+        } else {
+            None
+        };
         out.push(DriveEntry {
             // THE ROOM THIS ROW CAME FROM. An unfiltered drive concatenates
             // several rooms, and `GET /v1/files/{id}` needs the right `cohort`
@@ -2462,6 +2494,7 @@ async fn read_drive(
                 .unwrap_or(serde_json::Value::Null),
             custody,
             moderation,
+            takedown,
         });
     }
     // The ROOMS listed, not "the room" — an unfiltered drive spans several, and

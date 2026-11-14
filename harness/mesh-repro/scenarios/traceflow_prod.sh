@@ -62,11 +62,20 @@ stage_converge() { harness_log_count agent "converged to [1-9][0-9]* consent pee
 # 0.5.246, `source_peer="cirisagent-<host>-node-…"` for a key minted since. A
 # pattern naming only `ciris-agent…` read 0 beside arrive=15 (PR #866), so every
 # `ciris…` sender counts.
+#
+# Edge v45.1 (0.5.247): the agent's initiator side is unmetered on a
+# server-composed node (hot-added coordinators carry no metrics bag, fixed in
+# edge 45.1.3), and seat load removed the responder Deliveries that used to
+# carry the rows, so the counter reads 0 and the canonical logs no
+# `Deliver … envelopes=` for the Attestation plane. Its responder's round
+# report still names the agent and what it admitted, at INFO: that is the
+# receiver's direct evidence now.
 stage_ship() {
-  local sent recv
-  sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]')"
+  local sent recv round
+  sent="$(harness_log_count agent '"replication_envelopes_served_total":[1-9]|"replication_rows_out":[1-9]')"
   recv="$(harness_log_count canonical 'Deliver.*kind=Attestation source_peer="ciris[^"]*" envelopes=[1-9]')"
-  echo $(( ${sent:-0} + ${recv:-0} ))
+  round="$(harness_log_count canonical 'responder served an anti-entropy round to completion.* peer=ciris[^ ]* kind=Attestation report=RoundReport \{ kind: Attestation, admitted: [1-9]')"
+  echo $(( ${sent:-0} + ${recv:-0} + ${round:-0} ))
 }
 
 # ── the production-shape assertions, before any rung is read ────────────────

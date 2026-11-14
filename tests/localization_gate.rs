@@ -862,7 +862,12 @@ fn server_emitted_message_id_coverage_does_not_regress() {
     /// appeal routes' `moderation.{appeal_failed,no_standing,not_a_reviewer,
     /// nothing_to_appeal,nothing_to_rule,unknown_grounds,unknown_outcome}`.
     /// 46 -> 47: `community.two_people_only` (two people per room in 0.5.246).
-    const MAX_UNCOVERED: usize = 47;
+    /// 47 -> 50 for 0.5.247: the room takedown's
+    /// `moderation.{nothing_to_take_down,takedown_failed,takedown_needs_reason}`
+    /// — same reason, same list, queued with their English for the client.
+    /// 50 -> 51: `community.room_full` (rooms seat up to 100 people; it
+    /// replaces `community.two_people_only`, which the client already paid).
+    const MAX_UNCOVERED: usize = 51;
 
     let en = load_en();
     let ids = scraped_server_ids();

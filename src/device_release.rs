@@ -68,10 +68,12 @@ pub struct Released {
     pub occurrences: Vec<String>,
 }
 
-/// **Has this node's owner released it?** `Some` when an owner-binding names
-/// this node and every occurrence that owner held for it is revoked. `None`
-/// otherwise, including on a node nobody ever owned and on one whose eviction
-/// is only proposed.
+/// **Has this node's owner released it?** `Some` when this node's owner (the
+/// live owner-binding's, or, once the release has withdrawn it, the latest
+/// binding's) holds occurrences for it and every one is revoked. `None`
+/// otherwise: on a node nobody ever owned, on one whose eviction is only
+/// proposed, and on one a FORMER owner's revocations name while someone else
+/// owns it now.
 ///
 /// `roster_key` is this device's own roster key (`<fedID>-<fp>`) when it
 /// joined by approval: that, not the node key, is its occurrence under the
@@ -108,31 +110,74 @@ pub async fn released_by_keys(
     dir: &dyn ciris_persist::federation::FederationDirectory,
     mine: &[String],
 ) -> anyhow::Result<Option<Released>> {
-    // The owners that ever bound this node: the attesters of owner-bindings
-    // naming it, as the selves they signed for.
-    let mut owners: Vec<String> = Vec::new();
+    // WHOSE release counts: the node's owner, never a former one (CC 3.2, the
+    // steward's ruling on census risk 4, 2026-11-13). A release withdraws the
+    // owner's binding as well as the device's occurrences, so a finished
+    // release leaves NO live binding, and "live bindings only" alone would
+    // never see one. Hence two cases:
+    //
+    // - a LIVE owner-binding names this node: that owner, and only that owner,
+    //   is asked. This is a landed eviction whose bindings are still being
+    //   withdrawn (`finish_landed_releases`). A former owner whose occurrences
+    //   for this node are all revoked is NOT this node's owner any more and
+    //   cannot erase it.
+    // - none does: the owner of the MOST RECENT binding, which the release
+    //   withdrew. Any earlier owner was superseded by a later binding.
+    //
+    // Before 0.5.247 every attester of every owner-binding ever naming the node
+    // was asked, so a node now owned by B was wiped by A's old revocations.
+    let mut live: Vec<String> = Vec::new();
     for key in mine {
-        let rows = dir
-            .attestations_to_all(key)
-            .await
-            .map_err(|e| anyhow::anyhow!("attestations_to_all({key}): {e}"))?;
-        for r in rows.iter().filter(|r| {
-            r.attestation_type == ciris_persist::federation::types::attestation_type::DELEGATES_TO
-                && r.attestation_envelope
-                    .get("delegation_purpose")
-                    .and_then(serde_json::Value::as_str)
-                    == Some(crate::auth::ownership::OWNER_BINDING_PURPOSE)
-        }) {
-            let me = ciris_persist::federation::self_roster::self_of_at(
-                dir,
-                &r.attesting_key_id,
-                chrono::Utc::now(),
-            )
-            .await
-            .unwrap_or_else(|_| r.attesting_key_id.clone());
-            if !owners.contains(&me) {
-                owners.push(me);
+        match ciris_persist::federation::admission::owner_of(dir, key).await {
+            Ok(Some(o)) => {
+                if !live.contains(&o) {
+                    live.push(o);
+                }
             }
+            Ok(None) => {}
+            Err(e) => {
+                // Two live owners is a broken state persist refuses to settle;
+                // erasing a node over it would be the worst answer.
+                tracing::warn!(key, error = %e, "release check: ownership is ambiguous — not wiping");
+                return Ok(None);
+            }
+        }
+    }
+    let attesters: Vec<String> = if live.is_empty() {
+        let mut latest: Option<ciris_persist::federation::types::Attestation> = None;
+        for key in mine {
+            let rows = dir
+                .attestations_to_all(key)
+                .await
+                .map_err(|e| anyhow::anyhow!("attestations_to_all({key}): {e}"))?;
+            for r in rows.into_iter().filter(|r| {
+                r.attestation_type
+                    == ciris_persist::federation::types::attestation_type::DELEGATES_TO
+                    && r.attestation_envelope
+                        .get("delegation_purpose")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(crate::auth::ownership::OWNER_BINDING_PURPOSE)
+            }) {
+                if latest
+                    .as_ref()
+                    .is_none_or(|l| r.asserted_at > l.asserted_at)
+                {
+                    latest = Some(r);
+                }
+            }
+        }
+        latest.map(|r| r.attesting_key_id).into_iter().collect()
+    } else {
+        live
+    };
+    // The owner as the self it signed for (a roster key resolves to its fedID).
+    let mut owners: Vec<String> = Vec::new();
+    for a in attesters {
+        let me = ciris_persist::federation::self_roster::self_of_at(dir, &a, chrono::Utc::now())
+            .await
+            .unwrap_or(a);
+        if !owners.contains(&me) {
+            owners.push(me);
         }
     }
     for owner in owners {
