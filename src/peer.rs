@@ -839,7 +839,17 @@ async fn consent_for_canonicals(
 /// crosses regardless, and an appeal reached nobody: the client's two-node run
 /// on d892af04 saw the reviewer's node never hold the filing. Superset of
 /// edge's floor, as `default_covers_everything_edges_default_does` allows.
-pub const MODERATION_GRANT_PREFIXES: &[&str] = &["content_class:", "reconsideration:"];
+///
+/// 0.5.247: a moderator's `takedown_notice:` too. In a room of two the other
+/// member is always the author, who receives a row about them regardless, so
+/// the gap showed only at three: the native `big_room` ladder saw the notice
+/// withheld from the third member (`recipient_not_in_send_set`) and their node
+/// kept serving the body.
+pub const MODERATION_GRANT_PREFIXES: &[&str] = &[
+    "content_class:",
+    "reconsideration:",
+    ciris_persist::federation::takedown_tombstone::NOTICE_DIMENSION_PREFIX,
+];
 
 pub fn default_attestation_prefixes() -> Vec<String> {
     let mut all: Vec<&str> = DEFAULT_GRANT_ATTESTATION_PREFIXES.to_vec();

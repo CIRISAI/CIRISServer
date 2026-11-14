@@ -2123,7 +2123,8 @@ pub(crate) fn bearer_of(headers: &HeaderMap) -> Option<&str> {
 /// already my contact", shared by `GET /v1/contacts` and the incoming-request
 /// reader, so the two can never disagree about who still awaits an answer.
 /// **Widen every existing contact's grant to the current contact prefixes**
-/// (0.5.246: the room moderation rows, `content_class:` and `reconsideration:`).
+/// (0.5.246: the room moderation rows, `content_class:` and `reconsideration:`;
+/// 0.5.247: `takedown_notice:`).
 /// A contact's grant is otherwise re-checked only when the contact is added or
 /// first resolves, so a node upgraded from 0.5.245 would keep its contacts on
 /// the old five families and its rooms' appeals would still never cross.
@@ -5728,6 +5729,9 @@ async fn list_messages(
     if let Err(r) = require_member(&st, &owner, &community_id).await {
         return r;
     }
+    // A member's read is a cheap moment to hand a newcomer this node's room
+    // key, should the roster signal have passed this node by (CC C559).
+    crate::room_seat::roster_changed(&community_id);
     // A reader with no occurrence here is excluded from every FUTURE seal the
     // far side builds; provisioning on read fixes the next message, not this one.
     ensure_owner_content_occurrence(&st, &owner.key_id).await;

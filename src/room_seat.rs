@@ -15,6 +15,9 @@
 //!   widener seats from);
 //! - a widening this server wrote itself ([`roster_changed`] at each write).
 //!
+//! A room with a member still owed (their device not known here yet) is
+//! passed again every 30 s until it is not.
+//!
 //! One worker, coalesced per room. A (room, member) pair is remembered once
 //! the door answered for it (granted, nothing owed, or no minter here), so a busy room
 //! folds its roster once per change, not once per member per change. Persist's
@@ -28,6 +31,16 @@ use tokio::sync::mpsc;
 
 /// How long a burst of roster changes is gathered before one pass.
 const COALESCE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often a room with a member still owed a key is passed again: a
+/// newcomer's device record often arrives after their seat does.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Rooms with a member the door could not yet answer for.
+fn owed() -> &'static Mutex<BTreeSet<String>> {
+    static O: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+    O.get_or_init(Default::default)
+}
 
 fn sender() -> &'static OnceLock<mpsc::UnboundedSender<String>> {
     static TX: OnceLock<mpsc::UnboundedSender<String>> = OnceLock::new();
@@ -88,17 +101,50 @@ pub(crate) fn start(
     }
     let engine = Arc::clone(engine);
     handle.spawn(async move {
-        while let Some(first) = rx.recv().await {
-            tokio::time::sleep(COALESCE).await;
-            let mut rooms = BTreeSet::from([first]);
-            while let Ok(r) = rx.try_recv() {
-                rooms.insert(r);
+        let mut tick = tokio::time::interval(RETRY);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            let mut rooms = BTreeSet::new();
+            tokio::select! {
+                got = rx.recv() => {
+                    let Some(first) = got else { break };
+                    tokio::time::sleep(COALESCE).await;
+                    rooms.insert(first);
+                    while let Ok(r) = rx.try_recv() {
+                        rooms.insert(r);
+                    }
+                }
+                _ = tick.tick() => {
+                    rooms.extend(std::mem::take(&mut *owed()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)));
+                    // Every room this node's owner sits in: a seat that
+                    // replicated here raises no signal on every node (seen on
+                    // the native ladder). Answered members cost a memo lookup.
+                    rooms.extend(owner_rooms(&engine).await);
+                }
             }
             for room in rooms {
                 seat_room(&engine, &room).await;
             }
         }
     });
+}
+
+/// The community rooms this node's owner is a member of (none before a claim).
+async fn owner_rooms(engine: &Engine) -> Vec<String> {
+    let dir = engine.federation_directory();
+    let Ok(node) = crate::backend::content_occurrence_key_id(engine).await else {
+        return Vec::new();
+    };
+    let Ok(Some(owner)) = ciris_persist::federation::admission::owner_of(dir.as_ref(), &node).await
+    else {
+        return Vec::new();
+    };
+    dir.list_communities_for_member(&owner)
+        .await
+        .map(|cs| cs.into_iter().map(|c| c.community_key_id).collect())
+        .unwrap_or_default()
 }
 
 /// Seat every member of `room` this process has not yet seated. Returns the
@@ -138,11 +184,24 @@ pub async fn seat_room(engine: &Engine, room: &str) -> Vec<String> {
             Ok(out) => {
                 let r = &out.seat;
                 tracing::debug!(room, member = %member.key_id, report = ?r, "room seat");
-                // Done unless the member is not yet on persist's authorized
-                // roster (the fold ran ahead of it), or a device was excluded
-                // for want of keys (not yet provisioned): the next change in
-                // the room retries.
-                let done = r.skipped != Some("not_a_member") && r.excluded.is_empty();
+                // Done once the door answered for a member whose device this
+                // node knows (an empty answer for a member with no device
+                // here yet is not "nothing owed": their occurrence row often
+                // lands after their seat). Not done while the member is not
+                // on persist's authorized roster yet, or a device was
+                // excluded for want of keys. Owed rooms are passed again.
+                let known = r.skipped == Some("not_a_minter")
+                    || dir
+                        .list_identity_occurrences_for(&member.key_id)
+                        .await
+                        .is_ok_and(|os| os.iter().any(|o| o.encryption_pubkeys.is_some()));
+                let done = r.skipped != Some("not_a_member") && r.excluded.is_empty() && known;
+                if !done {
+                    owed()
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(room.to_owned());
+                }
                 // The door grants every live member device the epoch lacks,
                 // not only the seated member's: report each device once.
                 if !r.granted.is_empty() {

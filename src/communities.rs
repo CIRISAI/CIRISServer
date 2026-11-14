@@ -1743,14 +1743,16 @@ struct InviteRequest {
     expires_in_days: Option<i64>,
 }
 
-/// The most people a room seats (0.5.247; Eric 2026-11-13, "large rooms and
-/// moderation while we wait for the refactor"). 0.5.246 held rooms to two
-/// people until a newcomer could read the room's history at their seat and a
-/// room's approvals combined in the mesh; persist 61.4.0 carries both (CC
-/// C559's seat door, CIRISPersist#1252's cosign rows). The bound is the mesh
-/// the LTS line serves (edge v45.1.0: at most 100 nodes): a room cannot hold
-/// more people than the mesh holds nodes.
-pub const MAX_ROOM_PEOPLE: usize = 100;
+/// The most people a room seats. 0.5.246 held rooms to two people until a
+/// newcomer could read the room's history at their seat and members'
+/// approvals combined in the mesh. 0.5.247 carries both (CC C559's seat door,
+/// [`crate::room_seat`]; persist's cosign hold, `cosign_seat` below), but the
+/// room gate (harness/native `big_room`, 2026-11-14) was red at three people:
+/// a late joiner's bodies stayed unopened in one run of two, edge's puller not
+/// fetching again after its holders were retired. Eric's gate rule: any red,
+/// the limit stays. Lifting it is this one number (the LTS bound is 100, the
+/// mesh edge v45.1.0 serves), with client 0.5.242's decisions reader.
+pub const MAX_ROOM_PEOPLE: usize = 2;
 
 /// Per-room limits a TEST set, by id: `Some(n)` holds that room to `n`
 /// people, `None` lifts the limit. No production path writes here.
@@ -1791,10 +1793,20 @@ pub fn set_room_limit_for_tests(room_id: &str, max: usize) {
 
 /// The refusal a full room answers with, at either door.
 fn room_full(max: usize, members: usize, open: usize) -> Response {
+    // At two the refusal keeps 0.5.246's id and sentence, which every
+    // released client renders; any other limit says the room is full.
+    let (reason_id, says) = if max == 2 {
+        (
+            "community.two_people_only",
+            "A room holds two people for now.",
+        )
+    } else {
+        ("community.room_full", "This room is full.")
+    };
     refuse_with(
         StatusCode::CONFLICT,
-        "community.room_full",
-        "This room is full.",
+        reason_id,
+        says,
         serde_json::json!({
             "max_people": max,
             "members": members,

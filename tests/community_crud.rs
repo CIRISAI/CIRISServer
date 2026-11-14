@@ -2306,7 +2306,30 @@ async fn a_pair_rooms_roster_cannot_be_changed_here() {
 /// - Only the invitee answers (`membership.not_the_invitee`), only a founder
 ///   invites under `founder_only`, an expiry outside 1..=30 days is
 ///   `membership.bad_expiry`, and only the proposer withdraws.
-/// **A full room refuses the next seat** (`community.room_full`). 0.5.246
+/// **A room past two says it is full** (`community.room_full`): the id every
+/// limit but two refuses with, so a lifted limit needs no new refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_room_held_to_three_says_it_is_full() {
+    let nodes = mesh(4).await;
+    let (a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
+    let room = test_only_found(a, "three of us", &[b, c], json!({})).await;
+    ciris_server::communities::set_room_limit_for_tests(&room, 3);
+    contact(a, d).await;
+    let (s, v) = post(
+        a,
+        &format!("/v1/communities/{room}/invites"),
+        json!({ "key_id": d.owner.key_id }),
+    )
+    .await;
+    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
+    assert_eq!(
+        (v["max_people"].as_u64(), v["members"].as_u64()),
+        (Some(3), Some(3)),
+        "{v}"
+    );
+}
+
+/// **A full room refuses the next seat** (`community.two_people_only` at two). 0.5.246
 /// held every room to two people; 0.5.247 seats up to
 /// `MAX_ROOM_PEOPLE` (100). The refusal is the same at any limit, so this
 /// room is held to two by a test override: an open invitation counts toward
@@ -2322,10 +2345,11 @@ async fn a_full_room_refuses_the_next_seat() {
     assert_eq!(
         r["max_people"],
         ciris_server::communities::MAX_ROOM_PEOPLE,
-        "a room says its limit (0.5.247: 100): {r}"
+        "a room says its limit: {r}"
     );
-    // The refusal is the same at any limit; this room is held to two so
-    // three nodes reach it.
+    // Any limit refuses alike; this room is held to two so three nodes
+    // reach it (at two the refusal keeps 0.5.246's `two_people_only`; the
+    // general `room_full` is asserted in a_room_held_to_three_says_it_is_full).
     ciris_server::communities::set_room_limit_for_tests(&room, 2);
     let (_, r) = get(a, &format!("/v1/communities/{room}")).await;
     assert_eq!(r["max_people"], 2, "the room says its limit: {r}");
@@ -2344,7 +2368,7 @@ async fn a_full_room_refuses_the_next_seat() {
     invited(s, &v);
     let bob_p = v["proposal_id"].as_str().unwrap().to_owned();
     let (s, v) = invite(c).await;
-    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
     assert_eq!(v["max_people"], 2, "{v}");
     assert_eq!(v["open_invitations"], 1, "{v}");
     // Bob declines: his invitation no longer holds the seat.
@@ -2359,7 +2383,7 @@ async fn a_full_room_refuses_the_next_seat() {
     let _ = get(a, &format!("/v1/communities/{room}/invites")).await;
     assert!(fold(&a.engine, &room).await.contains(&c.owner.key_id));
     let (s, v) = invite(b).await;
-    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
     assert_eq!(v["members"], 2, "{v}");
     // The carried change refuses a third seat too — past the contact gate.
     contact(a, b).await;
@@ -2369,7 +2393,7 @@ async fn a_full_room_refuses_the_next_seat() {
         json!({ "op": "add", "key_id": b.owner.key_id }),
     )
     .await;
-    assert_eq!((s, reason(&v)), (409, "community.room_full"), "{v}");
+    assert_eq!((s, reason(&v)), (409, "community.two_people_only"), "{v}");
     assert_eq!(v["members"], 2, "{v}");
 }
 
