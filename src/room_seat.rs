@@ -16,7 +16,7 @@
 //! - a widening this server wrote itself ([`roster_changed`] at each write).
 //!
 //! A room with a member still owed (their device not known here yet) is
-//! passed again every 30 s until it is not.
+//! passed again on the pair-room driver's 30 s tick until it is not.
 //!
 //! One worker, coalesced per room. A (room, member) pair is remembered once
 //! the door answered for it (granted, nothing owed, or no minter here), so a busy room
@@ -32,9 +32,9 @@ use tokio::sync::mpsc;
 /// How long a burst of roster changes is gathered before one pass.
 const COALESCE: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// How often a room with a member still owed a key is passed again: a
-/// newcomer's device record often arrives after their seat does.
-const RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+/// The worker's word for "pass the owed and the owner's rooms" ([`sweep`]):
+/// no room id is empty.
+const SWEEP: &str = "";
 
 /// Rooms with a member the door could not yet answer for.
 fn owed() -> &'static Mutex<BTreeSet<String>> {
@@ -101,27 +101,26 @@ pub(crate) fn start(
     }
     let engine = Arc::clone(engine);
     handle.spawn(async move {
-        let mut tick = tokio::time::interval(RETRY);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        loop {
+        while let Some(first) = rx.recv().await {
+            tokio::time::sleep(COALESCE).await;
+            let mut asked = vec![first];
+            while let Ok(r) = rx.try_recv() {
+                asked.push(r);
+            }
             let mut rooms = BTreeSet::new();
-            tokio::select! {
-                got = rx.recv() => {
-                    let Some(first) = got else { break };
-                    tokio::time::sleep(COALESCE).await;
-                    rooms.insert(first);
-                    while let Ok(r) = rx.try_recv() {
-                        rooms.insert(r);
-                    }
-                }
-                _ = tick.tick() => {
-                    rooms.extend(std::mem::take(&mut *owed()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)));
+            for r in asked {
+                if r == SWEEP {
+                    rooms.extend(std::mem::take(
+                        &mut *owed()
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    ));
                     // Every room this node's owner sits in: a seat that
-                    // replicated here raises no signal on every node (seen on
-                    // the native ladder). Answered members cost a memo lookup.
+                    // replicated here raised no signal on one node of the
+                    // native ladder. Answered members cost a memo lookup.
                     rooms.extend(owner_rooms(&engine).await);
+                } else {
+                    rooms.insert(r);
                 }
             }
             for room in rooms {
@@ -129,6 +128,15 @@ pub(crate) fn start(
             }
         }
     });
+}
+
+/// Pass again every room with a member still owed, and every room this node's
+/// owner sits in. Called on the pair-room driver's tick (30 s): the cadence
+/// registry has no slot for a fifteenth periodic loop (`loop_cadence`).
+pub(crate) fn sweep() {
+    if let Some(tx) = sender().get() {
+        let _ = tx.send(SWEEP.to_owned());
+    }
 }
 
 /// The community rooms this node's owner is a member of (none before a claim).

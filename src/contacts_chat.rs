@@ -7644,6 +7644,8 @@ impl PairRoomDriver {
                     }
                 }
                 let _ = self.drive_once().await;
+                // The room-seat worker's retry rides this tick (CC C559).
+                crate::room_seat::sweep();
             }
             tracing::info!("pair-room driver stopped");
         })

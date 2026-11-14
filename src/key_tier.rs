@@ -389,7 +389,7 @@ pub fn apply_apple_store_defaults() {
             unsafe { std::env::set_var(READERS_ENV, "0") };
             tracing::warn!(
                 "store: the SQLite reader pool is OFF on iOS until persist's pool is measured \
-                 there (CIRISPersist#1261); reads use the writer connection. Set \
+                 there (history: CIRISPersist#1261); reads use the writer connection. Set \
                  CIRIS_PERSIST_SQLITE_READERS to override."
             );
         }
