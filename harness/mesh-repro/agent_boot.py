@@ -566,7 +566,14 @@ def main() -> int:
             time.sleep(30)
             try:
                 m = _json.loads(_rq.urlopen("http://127.0.0.1:4243/v1/federation/metrics", timeout=5).read().decode())
-                log(f"[DELIVERY-STATUS] {_json.dumps(m)[:600]}")
+                # The carriage total FIRST, compact, as the `ship` rung reads it
+                # (scenarios/traceflow.sh). It used to ride inside the 600-char
+                # dump below; edge v45.1's added counters pushed it past the cut
+                # and the rung read 0 on a run that landed every trace (0.5.247).
+                served = (m.get("data") or m).get("replication_envelopes_served_total") or {}
+                total = sum(v for v in served.values() if isinstance(v, int)) if isinstance(served, dict) else served
+                log("[DELIVERY-STATUS] " + _json.dumps({"envelopes_served_total": total, "by_kind": served},
+                                                       separators=(",", ":")) + " " + _json.dumps(m)[:600])
             except Exception as e:  # noqa: BLE001
                 log(f"[DELIVERY-STATUS] probe error: {type(e).__name__}: {e}")
 
