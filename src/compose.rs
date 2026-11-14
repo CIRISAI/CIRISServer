@@ -314,6 +314,11 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
     // are software-tier must not meet a newly loadable TPM plugin (#783).
     crate::key_tier::apply_apple_store_defaults();
     crate::key_tier::pin_process_tier(&cfg.home);
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        substrate = crate::substrate_line(),
+        "ciris-server starting"
+    );
 
     // SIGTERM handling for the life of the PROCESS, installed before anything
     // is bound or spawned (CIRISServer#555; #556 review): a `docker stop`

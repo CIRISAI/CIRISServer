@@ -2075,6 +2075,15 @@ pub fn version_line() -> String {
     format!("ciris-server {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// The substrate this build links, read from `Cargo.lock` at build time:
+/// `persist X (commit), edge Y (commit), verify Z (commit)` (0.5.247). Printed
+/// on the line AFTER [`version_line`], which a launcher's probe reads alone,
+/// and logged at boot.
+#[must_use]
+pub fn substrate_line() -> &'static str {
+    env!("CIRIS_LINKED_SUBSTRATE")
+}
+
 /// Resolve the node log directory from CLI args: `<home>/logs`, where `home` is
 /// the value of `--home <path>` / `--home=<path>` if present, else
 /// [`config::DEFAULT_CIRIS_HOME`]. Used by every node serve entry so file logging
@@ -2444,6 +2453,7 @@ mod python {
         // `ciris-server --version`: before anything else, as the binary does.
         if crate::is_version_request(&argv[1.min(argv.len())..]) {
             println!("{}", crate::version_line());
+            println!("{}", crate::substrate_line());
             return Ok(());
         }
         // File logging to <home>/logs (the node serve paths); resolved from argv so
@@ -3838,6 +3848,13 @@ mod legacy_user_alias_tests {
             ver.split('.').all(|p| p.parse::<u64>().is_ok()),
             "no v, no suffix: {line}"
         );
+        // The second line names the linked pair, as the lock pins it.
+        let sub = crate::substrate_line();
+        assert!(
+            sub.starts_with("persist ") && sub.contains(", edge ") && sub.contains(", verify "),
+            "{sub}"
+        );
+        assert!(!sub.contains("unknown"), "built from the lock: {sub}");
     }
 
     use super::legacy_user_alias;

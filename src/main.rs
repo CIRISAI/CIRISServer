@@ -8,6 +8,9 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
+    // Before any verb opens a store, the CLI's offline verbs included: the serve
+    // path's own call comes too late for them (the macOS CLI hole of 0.5.246).
+    ciris_server::key_tier::apply_apple_store_defaults();
     // The floor lives in the library, not here: `main.rs` is one of THREE runtime
     // construction sites, and the other two host the embedded agent/fold serve
     // path on exactly the small hosts this exists for (CIRISServer#501).
@@ -33,6 +36,7 @@ async fn async_main(worker_threads: usize) -> Result<()> {
     // choose its flags; CIRISClient, 0.5.246).
     if ciris_server::is_version_request(&argv) {
         println!("{}", ciris_server::version_line());
+        println!("{}", ciris_server::substrate_line());
         return Ok(());
     }
     // `accord sign-bytes` prints exactly one JSON object on stdout for a wrapper to

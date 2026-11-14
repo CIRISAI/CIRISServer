@@ -102,14 +102,6 @@ jobs:
           components: clippy
       - name: Set up sccache (compiler cache over GHA)
         uses: mozilla-actions/sccache-action@v0.0.9
-      # The node turns persist 61.2.2's SQLite reader pool OFF on Apple hosts
-      # before any store opens (key_tier::apply_apple_store_defaults,
-      # CIRISPersist#1261): the pool cannot open a file-backed store there.
-      # Tests that open an Engine directly never pass that door, so the lane
-      # sets the same default. Remove with the persist 61.2.3 adopt.
-      - name: Apple store default (persist 61.2.2 reader pool)
-        if: runner.os == 'macOS'
-        run: echo "CIRIS_PERSIST_SQLITE_READERS=0" >> "$GITHUB_ENV"
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
         # libtss2-dev: the Linux-only keyring/tpm backend (cfg(target_os=linux)).

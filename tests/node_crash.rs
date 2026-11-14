@@ -148,8 +148,8 @@ fn dsn(path: &std::path::Path) -> String {
 }
 
 async fn open(path: &std::path::Path) -> Result<Arc<Engine>, String> {
-    // As the node does before any store opens: on Apple hosts persist 61.2.2's
-    // reader pool cannot open a file-backed store (CIRISPersist#1261).
+    // As the node does before any store opens (on iOS, the reader pool stays
+    // off until it is measured there; CIRISPersist#1261).
     ciris_server::key_tier::apply_apple_store_defaults();
     Engine::with_signer(Arc::new(signer_for(NODE_ALIAS)), &dsn(path))
         .await
