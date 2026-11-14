@@ -1305,6 +1305,71 @@ async fn a_widened_member_reads_the_rooms_messages_cirispersist_907() {
     assert_eq!(s, 200, "a widened member reads the transcript: {v}");
 }
 
+/// **#874: a member seated late reads every message written before their
+/// seat, with nobody writing again** (CC C559, persist 61.4.0's seat door,
+/// 0.5.247). Before it, the room's epoch keys reached a newcomer only through
+/// the next seal's grant emission, so Carol saw every earlier message
+/// unopened until Alice or Bob spoke. The server seats a newcomer when a
+/// roster row lands (`room_seat`); this fixture has no replication runtime, so
+/// it runs the same pass the worker runs, on each minter's node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_seated_late_reads_what_was_said_before_874() {
+    let nodes = mesh(3).await;
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let room = test_only_found(a, "late joiner reads", &[b], json!({})).await;
+    let (s, v) = get(b, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "bob opens the room: {v}");
+    let said = ["before carol, from alice", "before carol, from bob"];
+    for (n, text) in [(a, said[0]), (b, said[1])] {
+        let (s, v) = post(
+            n,
+            &format!("/v1/chat/{room}/messages"),
+            json!({ "body": text }),
+        )
+        .await;
+        assert_eq!(s, 200, "send: {v}");
+    }
+    // Carol's node holds its content occurrence, as a booted node does from
+    // its self-room tick, before anyone seats her.
+    ciris_server::backend::provision_engine_occurrence(&c.engine, &c.owner.key_id)
+        .await
+        .expect("carol's content occurrence");
+    contact(a, c).await;
+    join_by_invitation(a, &room, c, None, &[b]).await;
+    // The seat: each minter's node gives Carol its current epoch key.
+    let carols = ciris_server::backend::content_occurrence_key_id(&c.engine)
+        .await
+        .expect("carol's occurrence key");
+    for n in [a, b] {
+        let granted = ciris_server::room_seat::seat_room(&n.engine, &room).await;
+        assert_eq!(
+            granted,
+            vec![carols.clone()],
+            "{}'s node grants its epoch to carol's device, and only hers",
+            n.owner.key_id
+        );
+    }
+    let (s, v) = get(c, &format!("/v1/chat/{room}/messages")).await;
+    assert_eq!(s, 200, "{v}");
+    let mut bodies: Vec<&str> = v["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|m| m["body"].as_str().unwrap_or("<unopened>"))
+        .collect();
+    bodies.sort_unstable();
+    let mut want = said.to_vec();
+    want.sort_unstable();
+    assert_eq!(
+        bodies, want,
+        "carol reads both, and nobody wrote again: {v}"
+    );
+    // A second pass seats nobody new.
+    assert!(ciris_server::room_seat::seat_room(&a.engine, &room)
+        .await
+        .is_empty());
+}
+
 // ─── 5. The appointed moderator ─────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

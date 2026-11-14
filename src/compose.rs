@@ -4483,6 +4483,10 @@ async fn setup_peer_replication(
     // grants the signer identity authored, and the empty topology then clobbered
     // the live one (envelopes_sent=0 under a fully green transport).
     let started = start_replication_runtime(engine, edge, edge.signer_key_id()).await;
+    // A newcomer gets this node's room keys at their seat, not at the next
+    // content write (CC C559, #874): the seat worker listens to edge's roster
+    // rows from here on.
+    crate::room_seat::start(engine, started.as_ref().ok().and_then(Option::as_ref));
 
     // RECEIVE AXIS (CIRISEdge#462 / CIRISServer#392) — once replication is up, ask
     // our peers for the OWNER's own testimony.

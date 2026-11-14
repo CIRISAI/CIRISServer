@@ -3503,6 +3503,207 @@ def kex_unannounced_canonical(mesh: Mesh, args: Any) -> Record:
     return {"verdict": "PASS" if ok else "FAIL", "steps": step.log, "first_failure": step.first_failure}
 
 
+_NAMES = ("alice", "bob", "carol", "dave", "erin", "frank", "grace", "heidi",
+          "ivan", "judy", "mallory", "niaj")
+
+
+def big_room(mesh: Mesh, args: Any) -> Record:
+    """The ROOM GATE for 0.5.247 (Eric 2026-11-13: large rooms and moderation on
+    the LTS). ROOM_N people (default 6), each on their own node, join one
+    community room ONE AT A TIME, the way people do: invited, accepting on their
+    own node, seated by the room's majority (the other members co-sign on their
+    own nodes, the founder assembles). History grows as they join.
+
+    Each newcomer must read EVERY message said before their seat with nobody
+    writing again (CIRISServer#874, CC C559: the minters' nodes seat them into
+    their epochs). Each then speaks, and the send's wall time is recorded, so a
+    key-grant cost that grows with the room shows as a rising send time. At full
+    size every member reads every body; then the founder takes a member's
+    message down, every node withholds it, a plain member is refused the same
+    act, the author appeals from their node, the founder reverses, and every
+    node reads the body again."""
+    n_people = int(os.environ.get("ROOM_N", "6"))
+    if not 3 <= n_people <= len(_NAMES):
+        raise MeshError(f"ROOM_N must be 3..{len(_NAMES)}")
+    names = _NAMES[:n_people]
+    step = Steps(f"""
+BIG ROOM — {n_people} people join one room one by one; each newcomer reads the history.
+  proves:  a late joiner reads every earlier message with nobody writing again (#874);
+           send time stays flat as the room grows; at full size a takedown, a plain
+           member's refusal, an appeal and a reversal reach every node.""")
+    nodes = {n: mesh.add(n) for n in names}
+    for n in nodes.values():
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    everyone = list(nodes.values())
+    for host in everyone:
+        for guest in everyone:
+            if host is not guest:
+                wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                         lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    for host in everyone:
+        for guest in everyone:
+            if host is not guest:
+                host.add_contact(guest.contact_code())
+    t_res = time.time()
+    for host in everyone:
+        for guest in everyone:
+            if host is not guest:
+                wait_for(f"{host.name} to resolve {guest.name} to a node", lambda h=host, g=guest:
+                         True if g.node_key_id and h.knows(g.node_key_id) else None,
+                         args.arrive_wait * 2, every=2)
+    step("resolved", seconds=round(time.time() - t_res, 1), people=n_people)
+
+    a = everyone[0]
+    got = a.must("POST", "/v1/communities", {"name": f"big-room-{n_people}"})
+    room = got.get("community_id") or got.get("id")
+    step("founded", room=room, max_people=got.get("max_people"))
+    said: Dict[str, str] = {}
+
+    def speak(n: Node, text: str) -> float:
+        t0 = time.time()
+        said[n.say(room, text)] = text
+        return round(time.time() - t0, 2)
+
+    first = speak(a, "history from alice")
+    step("said:alice", send_s=first)
+    seated: List[Node] = [a]
+
+    def bodies_on(n: Node) -> Dict[str, Optional[str]]:
+        return {m.get("attestation_id"): m.get("body") for m in n.room(room)["messages"]}
+
+    def reads_all(n: Node) -> Optional[bool]:
+        got = bodies_on(n)
+        return True if all(got.get(i) == t for i, t in said.items()) else None
+
+    def admit(m: Node) -> None:
+        code, body = a.api("POST", f"/v1/communities/{room}/invites", {"key_id": m.owner_key_id})
+        if code not in (200, 201, 202):
+            raise MeshError(f"invite {m.name} answered {code}: {body}")
+        pid = wait_for(f"{m.name} to list the invitation", lambda: next(
+            (r["proposal_id"] for r in m.must("GET", "/v1/self/invites").get("invites", [])
+             if r.get("group_id") == room), None), args.arrive_wait, every=2)
+        m.must("POST", f"/v1/self/invites/{pid}/accept", {})
+        others = [x for x in seated if x is not a]
+        if others:
+            env = a.must("POST", f"/v1/communities/{room}/changes/envelope",
+                         {"op": "add", "key_id": m.owner_key_id})
+            sigs = list(env.get("signatures") or [])
+            for o in others:
+                sigs.append(o.must("POST", f"/v1/communities/{room}/changes/cosign",
+                                   {"change_envelope": env["change_envelope"]})["signature"])
+
+            def assembled() -> Optional[Any]:
+                code, body = a.api("POST", f"/v1/communities/{room}/changes/assemble",
+                                   {"change_envelope": env["change_envelope"], "signatures": sigs})
+                if code in (200, 201, 202):
+                    return body
+                if isinstance(body, dict) and body.get("reason_id") == "membership.awaiting_acceptance":
+                    return None
+                raise MeshError(f"assemble for {m.name} answered {code}: {body}")
+
+            wait_for(f"alice to assemble {m.name}'s seat", assembled, args.arrive_wait * 2, every=2)
+
+        def is_seated() -> Optional[bool]:
+            a.api("GET", f"/v1/communities/{room}/invites")
+            _, view = a.api("GET", f"/v1/communities/{room}")
+            ms = (view or {}).get("members") or [] if isinstance(view, dict) else []
+            return True if any(m.owner_key_id in json.dumps(x) for x in ms) else None
+
+        wait_for(f"alice to seat {m.name}", is_seated, args.arrive_wait * 2, every=2)
+        seated.append(m)
+
+    for m in everyone[1:]:
+        t_seat_start = time.time()
+        admit(m)
+        t_seat = time.time()
+        step(f"seated:{m.name}", members=len(seated), seat_s=round(t_seat - t_seat_start, 1))
+        try:
+            wait_for(f"{m.name} to read all {len(said)} earlier messages, nobody writing",
+                     lambda m=m: reads_all(m), args.arrive_wait * 2, every=2)
+        except MeshError:
+            got = bodies_on(m)
+            step.fail(f"history_NOT_read:{m.name}",
+                      "a newcomer must read every message said before their seat without a new "
+                      "write (#874, CC C559 seat door)", everyone, r"room seat|key_grant|epoch|not_granted",
+                      unopened=[i for i, t in said.items() if got.get(i) != t])
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        step(f"history:{m.name}", messages=len(said), read_s=round(time.time() - t_seat, 1))
+        step(f"said:{m.name}", send_s=speak(m, f"hello from {m.name}"), members=len(seated))
+
+    for n in everyone:
+        try:
+            wait_for(f"{n.name} to read all {len(said)} bodies", lambda n=n: reads_all(n),
+                     args.arrive_wait * 2, every=2)
+        except MeshError:
+            step.fail(f"full_room_NOT_read:{n.name}", "every member reads every body at full size",
+                      everyone, r"not_granted|epoch|withheld")
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("everyone_reads_everything", people=n_people, messages=len(said))
+
+    # Moderation at full size: the founder holds takedown and review.
+    author = everyone[1]
+    target = next(i for i, t in said.items() if t == f"hello from {author.name}")
+    plain = everyone[2]
+    st, body = plain.api("POST", f"/v1/chat/{room}/items/{target}/takedown",
+                         {"reason": "not mine to take"}, timeout=120)
+    step("takedown:plain_member_refused", status=st,
+         reason=(body or {}).get("reason_id") if isinstance(body, dict) else None)
+    if st == 200:
+        step.fail("plain_member_took_down", "a member with no takedown duty must be refused",
+                  everyone, _TAKEDOWN)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    a.must("POST", f"/v1/chat/{room}/items/{target}/takedown",
+           {"reason": "breaks the room's standards"}, timeout=120)
+
+    def state_on(n: Node) -> Optional[Dict[str, Any]]:
+        return next((m for m in n.room(room)["messages"] if m.get("attestation_id") == target), None)
+
+    t_td = time.time()
+    for n in everyone:
+        try:
+            wait_for(f"the takedown on {n.name}'s node", lambda n=n: (m := state_on(n)) and
+                     m.get("unopened_reason") == "taken_down" and "body" not in m and m or None,
+                     args.arrive_wait * 2, every=3)
+        except MeshError:
+            step.fail(f"takedown_NOT_on:{n.name}", "the notice must reach every member's node",
+                      everyone, _TAKEDOWN, message=state_on(n))
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("takedown:everywhere", seconds=round(time.time() - t_td, 1))
+    author.must("POST", f"/v1/chat/{room}/items/{target}/reconsider", {"grounds": "new_evidence"},
+                timeout=120)
+    step("appeal:filed", by=author.name)
+
+    def appeal_seen() -> Optional[bool]:
+        st, _ = a.api("POST", f"/v1/chat/{room}/items/{target}/rule", {"outcome": "reversed"},
+                      timeout=120)
+        return True if st == 200 else None
+
+    try:
+        wait_for("the founder to hold the appeal and reverse it", appeal_seen,
+                 args.arrive_wait * 2, every=3)
+    except MeshError:
+        step.fail("appeal_NOT_on_founder", "the author's appeal must reach the reviewer's node",
+                  everyone, _TAKEDOWN, message=state_on(a))
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    t_rv = time.time()
+    for n in everyone:
+        try:
+            wait_for(f"the body back on {n.name}'s node", lambda n=n: (m := state_on(n)) and
+                     m.get("body") == said[target] and m or None, args.arrive_wait * 2, every=3)
+        except MeshError:
+            step.fail(f"reversal_NOT_on:{n.name}", "the reversal must restore the body on every node",
+                      everyone, _TAKEDOWN, message=state_on(n))
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("reversal:everywhere", seconds=round(time.time() - t_rv, 1))
+    sends = [x for x in step.log if str(x.get("step", "")).startswith("said:")]
+    return {"verdict": "PASS", "steps": step.log,
+            "values": {"ROOM_ID": room, "ROOM_N": n_people,
+                       "SEND_S": [x.get("send_s") for x in sends]}}
+
+
 SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "room_file": room_file,
     "room_takedown": room_takedown,
@@ -3521,6 +3722,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "peer_pair": peer_pair,
     "av_call": av_call,
     "av_room": av_room,
+    "big_room": big_room,
     "av_mesh": av_mesh,
     "av_member": av_member,
     "decisions": decisions,

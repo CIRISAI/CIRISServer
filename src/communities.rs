@@ -1163,6 +1163,7 @@ async fn apply_change(
                 cosigs("widening", key_id),
             )
             .await?;
+            crate::room_seat::roster_changed(room.id());
         }
         ChangeOp::Role { key_id, role } => {
             put_widening(
