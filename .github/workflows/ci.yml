@@ -333,7 +333,13 @@ jobs:
         # READ to the owner-binding's federation scope (`AttestationQuery::scope`)
         # to ask whether a person could have announced. It emits nothing; the
         # audit matches the token, and a read at federation scope widens no one.
-        run: python3 tools/audit_cohort_scope_callers.py --max-federation 55
+        # 55 -> 56 (0.5.247): `room_takedown::take_down`, a moderator's
+        # `takedown_notice:` row (CC 4.5.3). It names the content's author, so
+        # persist's community door refuses it at community scope (AV-84, the
+        # same reason `content_class:` flags and `reconsideration:` appeals are
+        # federation rows); every member's node must hold it to withhold the
+        # bytes. Reviewed.
+        run: python3 tools/audit_cohort_scope_callers.py --max-federation 56
       # ── The CSD/4 catalogue model (FSD/CSD4.md §7) ──────────────────────────
       #
       # The topology catalogue is LOCKED: twenty entries, a closed vocabulary of
