@@ -45,9 +45,10 @@ on:
         required: false
         # 0.5.203 was removed from PyPI on 2026-10-18 (its release entry is gone,
         # not yanked). 0.5.207-0.5.220 were deleted on 2026-10-26 to get under
-        # PyPI's 10 GiB project cap (v0.5.238's upload hit it); 0.5.221 is the
+        # PyPI's 10 GiB project cap (v0.5.238's upload hit it), and 0.5.221-0.5.224
+        # on 2026-11-15 when v0.5.248's upload hit it again; 0.5.225 is the
         # oldest release this lane can still install.
-        default: "0.5.221"
+        default: "0.5.225"
   pull_request:
     paths:
       # Anything that can change how an EXISTING database is read or migrated.
@@ -76,7 +77,7 @@ jobs:
     env:
       # The floor we claim to support upgrading from. Logged every run, so a
       # jump that quietly shortens is visible rather than assumed.
-      FROM_VERSION: ${{ inputs.from-version || '0.5.221' }}
+      FROM_VERSION: ${{ inputs.from-version || '0.5.225' }}
     steps:
       - uses: actions/checkout@v4
 
