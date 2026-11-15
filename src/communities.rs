@@ -1770,7 +1770,31 @@ fn max_people_of(room_id: &str) -> Option<usize> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(room_id)
         .copied()
-        .unwrap_or(Some(MAX_ROOM_PEOPLE))
+        .unwrap_or_else(default_room_limit)
+}
+
+/// The limit a room is born with: [`MAX_ROOM_PEOPLE`]. A test-anchor build
+/// under `CIRIS_TESTING_MODE=true` reads `CIRIS_TEST_ROOM_LIMIT` (a number,
+/// or `none` for no limit) instead, so the room ladder (harness/native
+/// `big_room`) runs on the ordinary test-anchor binary rather than a patched
+/// build. A production build has no such reader: the `cfg` removes it.
+fn default_room_limit() -> Option<usize> {
+    #[cfg(feature = "test-anchor")]
+    {
+        static L: std::sync::OnceLock<Option<Option<usize>>> = std::sync::OnceLock::new();
+        if let Some(limit) = *L.get_or_init(|| {
+            if std::env::var("CIRIS_TESTING_MODE").as_deref() != Ok("true") {
+                return None;
+            }
+            match std::env::var("CIRIS_TEST_ROOM_LIMIT").ok()?.trim() {
+                "none" => Some(None),
+                n => n.parse::<usize>().ok().filter(|n| *n >= 2).map(Some),
+            }
+        }) {
+            return limit;
+        }
+    }
+    Some(MAX_ROOM_PEOPLE)
 }
 
 /// Lift the people limit for ONE room, in a test.

@@ -909,6 +909,10 @@ pub async fn register_node_key_with_record(
         signed.record.attestation_evidence = Some(crate::software_only_test_marker());
     }
     let key_id = signed.record.key_id.clone();
+    let pair = (
+        signed.record.pubkey_ed25519_base64.clone(),
+        signed.record.pubkey_ml_dsa_65_base64.clone(),
+    );
     let record_json = serde_json::to_string(&signed)
         .map_err(|e| anyhow::anyhow!("serialize node SignedKeyRecord: {e}"))?;
 
@@ -917,11 +921,119 @@ pub async fn register_node_key_with_record(
             tracing::info!(node_key_id = %key_id, "node key registered (identity_type=node)");
         }
         Err(FederationError::Conflict(_)) => {
+            refuse_a_second_pair(engine, &key_id, &pair).await?;
             tracing::debug!(node_key_id = %key_id, "node key already registered — idempotent");
         }
         Err(e) => return Err(anyhow::anyhow!("register node key {key_id}: {e}")),
     }
     Ok((key_id, record_json))
+}
+
+/// A `Conflict` from registering a key is "already registered" ONLY when the
+/// held record carries the same pair (0.5.249). Persist answers `Conflict`
+/// for a changed pubkey too (first record wins, CIRISPersist), and before this
+/// every such answer was taken as the idempotent no-op: a node re-keyed under
+/// its own id signed on with a half its own record does not hold, and every
+/// peer refused it as `pubkey_swap` (CIRISAgent 2.22.0 and 2.22.1, linux and
+/// windows). Now it stops, naming the key, before it signs anything.
+///
+/// # Errors
+/// The held record names a different Ed25519 or ML-DSA-65 key, or it cannot
+/// be read.
+pub async fn refuse_a_second_pair(
+    engine: &ciris_persist::prelude::Engine,
+    key_id: &str,
+    (ed, pqc): &(String, Option<String>),
+) -> Result<()> {
+    let held = engine
+        .federation_directory()
+        .lookup_public_key(key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("read the held record of {key_id}: {e:#}"))?;
+    let Some(held) = held else {
+        return Ok(());
+    };
+    if &held.pubkey_ed25519_base64 == ed && held.pubkey_ml_dsa_65_base64 == *pqc {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "key {key_id} is registered here with a different key pair than this node now holds \
+         (pubkey_swap: the store keeps the first record, and every peer would refuse the rows \
+         this key signs). The home lost part of its identity, or another key took its files. \
+         Restore the node's key files, or wipe the whole home (key files AND store) so the \
+         node starts as a new identity"
+    )
+}
+
+/// **A home that kept its engine Ed25519 key but lost `ml_dsa_65.seed` starts
+/// as a NEW identity** (0.5.249; CIRISAgent 2.22.1's five-platform run,
+/// windows, 2026-11-15).
+///
+/// A device reset on Windows could not delete files the running node held
+/// open: it removed `node_alias` and `ml_dsa_65.seed` but left the keystore
+/// files of the alias. The next boot minted a fresh ML-DSA-65 seed beside the
+/// surviving Ed25519 key. The key id fingerprints the Ed25519 half alone, so
+/// the same id carried a second PQC half, and the canonical refused it as
+/// `pubkey_swap`. Half an identity cannot sign as the whole one, so the
+/// survivor is moved aside (renamed `<file>.pubkey_swap-<unix>`, never
+/// deleted) and the boot mints a fresh pair under a new id.
+///
+/// Acts only when `ml_dsa_65.seed` is absent, no plaintext takeover seed is
+/// waiting (`ed25519.seed`, adopted byte-identically by
+/// `compose::federation_signer`), and the alias's Ed25519 key opens. A key in a
+/// tier with no files here (Secure Enclave, keychain) cannot be moved, so the
+/// boot is refused instead, naming the cure. Returns the paths moved.
+///
+/// # Errors
+/// The surviving key lives in a file-less tier, or a file could not be moved.
+pub fn set_aside_half_identity(
+    alias: &str,
+    identity_dir: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    if identity_dir.join("ml_dsa_65.seed").exists()
+        || identity_dir.join(crate::config::SEED_FILENAME).exists()
+    {
+        return Ok(Vec::new());
+    }
+    if crate::key_tier::ed25519_open_existing(alias, identity_dir).is_err() {
+        return Ok(Vec::new());
+    }
+    if crate::key_tier::on_disk_tier(alias, identity_dir) == crate::key_tier::OnDiskTier::Absent {
+        anyhow::bail!(
+            "the federation key {alias} survives in this platform's keystore but its ML-DSA-65 \
+             half (ml_dsa_65.seed) is gone: signing on would put a second PQC half under the \
+             same key id (pubkey_swap). Restore ml_dsa_65.seed, or delete the keystore entry \
+             {alias} so this home starts as a new node"
+        );
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let prefix = format!("{alias}.");
+    let mut moved = Vec::new();
+    for entry in std::fs::read_dir(identity_dir)
+        .with_context(|| format!("list {}", identity_dir.display()))?
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&prefix) || name.contains(".pubkey_swap-") {
+            continue;
+        }
+        let to = identity_dir.join(format!("{name}.pubkey_swap-{stamp}"));
+        std::fs::rename(entry.path(), &to)
+            .with_context(|| format!("move {} aside", entry.path().display()))?;
+        moved.push(to);
+    }
+    tracing::warn!(
+        alias,
+        moved = ?moved,
+        "HALF AN IDENTITY: this home kept the federation key's Ed25519 half but lost its \
+         ML-DSA-65 seed (a partial reset). Signing on would put a second PQC half under the \
+         same key id, which every peer refuses (pubkey_swap). The surviving key is kept aside, \
+         not deleted, and this boot mints a new key pair: the node starts as a new identity"
+    );
+    Ok(moved)
 }
 
 /// **The structural gate: resolve the key this node will BE, and refuse an actor.**
