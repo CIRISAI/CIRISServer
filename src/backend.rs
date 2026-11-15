@@ -579,6 +579,14 @@ impl ciris_edge::blob_swarm::BlobChunkSource for ServerBlobChunkSource {
         }
         scope
     }
+
+    /// CIRISEdge#771: a wrapper forwards the Edge's metrics bag to the source
+    /// it wraps. The trait default is a no-op, so without this the inner
+    /// source's legacy DAG-walk counter was dark on every server node (edge's
+    /// sweep of the metrics-bag class, 2026-11-14).
+    fn attach_metrics(&self, metrics: ciris_edge::observability::EdgeMetrics) {
+        ciris_edge::blob_swarm::BlobChunkSource::attach_metrics(&self.inner, metrics);
+    }
 }
 
 /// The process-wide serve/apply revocation register (CIRISEdge#606). Built on

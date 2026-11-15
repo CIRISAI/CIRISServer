@@ -669,6 +669,111 @@ mod tests {
     }
 }
 
+/// The node key's ML-DSA-65 half when this home already registered the node
+/// key under its Ed25519 half (see [`node_signer`]): copy the seed that matches
+/// the registered record to `node_ml_dsa_65.seed`. No record: nothing to adopt,
+/// a fresh seed is minted. A record whose PQC half no seed here matches is a
+/// refusal, never a fresh mint: signing on would be a key swap under a kept id.
+async fn adopt_registered_node_pqc(
+    dir: &dyn ciris_persist::federation::FederationDirectory,
+    ed: &Arc<dyn HardwareSigner>,
+    alias: &str,
+    identity_dir: &std::path::Path,
+    node_pqc_path: &std::path::Path,
+) -> Result<()> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let engine_seed = identity_dir.join("ml_dsa_65.seed");
+    // The id the node key derives to depends on its Ed25519 half alone, so any
+    // PQC half composes the same id; the engine seed is the candidate.
+    let Ok(candidate) = MlDsa65SoftwareSigner::from_seed_file(&engine_seed, format!("{alias}-pqc"))
+    else {
+        return Ok(());
+    };
+    let candidate: Arc<dyn PqcSigner> = Arc::new(candidate);
+    let probe = ciris_persist::prelude::LocalSigner::from_hardware_parts(
+        ed.clone(),
+        alias.to_owned(),
+        Some(candidate.clone()),
+        Some(format!("{alias}-pqc")),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("compose node probe signer: {e}"))?;
+    let key_id = probe.derived_key_id();
+    let Some(rec) = dir
+        .lookup_public_key(&key_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("lookup node key {key_id}: {e:#}"))?
+    else {
+        return Ok(());
+    };
+    let Some(registered) = rec.pubkey_ml_dsa_65_base64.as_deref() else {
+        return Ok(());
+    };
+    // The node's own seed already matches its record: nothing to do.
+    if node_pqc_path.exists() {
+        let held = MlDsa65SoftwareSigner::from_seed_file(node_pqc_path, format!("{alias}-pqc"))
+            .map_err(|e| anyhow::anyhow!("read node ML-DSA-65 seed: {e}"))?;
+        let held_pub = b64.encode(
+            held.public_key()
+                .await
+                .map_err(|e| anyhow::anyhow!("node ML-DSA-65 public key: {e}"))?,
+        );
+        if held_pub == registered {
+            return Ok(());
+        }
+    }
+    let candidate_pub = b64.encode(
+        candidate
+            .public_key()
+            .await
+            .map_err(|e| anyhow::anyhow!("engine ML-DSA-65 public key: {e}"))?,
+    );
+    if candidate_pub == registered {
+        // A mismatched node seed (minted by the broken split) is kept beside
+        // it, never deleted: it is key material.
+        if node_pqc_path.exists() {
+            let aside = node_pqc_path.with_extension("seed.pubkey_swap");
+            std::fs::rename(node_pqc_path, &aside)
+                .with_context(|| format!("set aside {}", node_pqc_path.display()))?;
+            tracing::warn!(
+                node_key_id = %key_id,
+                set_aside = %aside.display(),
+                "split home: this node's ML-DSA-65 seed disagreed with the record it registered \
+                 (a second PQC half under the same id, refused by peers as pubkey_swap); the \
+                 registered half is restored and the other seed is kept aside"
+            );
+        }
+        std::fs::copy(&engine_seed, node_pqc_path).with_context(|| {
+            format!(
+                "adopt {} as {}",
+                engine_seed.display(),
+                node_pqc_path.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(node_pqc_path, std::fs::Permissions::from_mode(0o600));
+        }
+        tracing::warn!(
+            node_key_id = %key_id,
+            "split home: this node key was registered on an earlier bare boot with the engine's \
+             ML-DSA-65 seed; the node keeps that exact pair (adopted as node_ml_dsa_65.seed) \
+             rather than minting a second PQC half under the same id, which peers refuse as \
+             pubkey_swap"
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "node key {key_id} is registered with an ML-DSA-65 public key no seed in {} matches. \
+         Minting a new one would sign a second PQC half under the same id, which every peer \
+         refuses (pubkey_swap). Restore the node's original ML-DSA-65 seed as \
+         node_ml_dsa_65.seed, or re-key the node (a new Ed25519 key, a new id).",
+        identity_dir.display()
+    )
+}
+
 /// Mint (or re-open) the node's OWN hybrid signer under `<alias>-node`.
 ///
 /// Byte-for-byte the shape of [`crate::compose::substrate_persist_signer`],
@@ -682,6 +787,7 @@ mod tests {
 pub async fn node_signer(
     keystore_alias: &str,
     identity_dir: &std::path::Path,
+    directory: Option<&dyn ciris_persist::federation::FederationDirectory>,
 ) -> Result<(
     Arc<ciris_persist::prelude::LocalSigner>,
     ciris_verify_core::self_at_login::HardwareRootedIdentity,
@@ -695,6 +801,20 @@ pub async fn node_signer(
 
     let pqc_alias = format!("{alias}-pqc");
     let pqc_path = identity_dir.join("node_ml_dsa_65.seed");
+    // A node key this home already REGISTERED keeps the exact hybrid pair it
+    // registered with. A home that first booted bare registered its home-picked
+    // key with the engine's `ml_dsa_65.seed`; when a later agent boot splits
+    // and adopts that key as the node, minting a fresh node seed would put a
+    // second PQC half under the same id (the id fingerprints the Ed25519 half
+    // only), which every peer refuses as `pubkey_swap` (CIRISPersist register
+    // door; first record wins) and every row signed after it then fails its
+    // scrub check. CIRISAgent 2.22.0's five-platform run, linux and windows,
+    // 2026-11-14.
+    // A home that already ran the broken split (0.5.246–0.5.247) holds a node
+    // seed that disagrees with its registered record; the same check heals it.
+    if let Some(dir) = directory {
+        adopt_registered_node_pqc(dir, &ed, &alias, identity_dir, &pqc_path).await?;
+    }
     let pqc = if pqc_path.exists() {
         MlDsa65SoftwareSigner::from_seed_file(&pqc_path, pqc_alias.clone())
             .map_err(|e| anyhow::anyhow!("adopt node ML-DSA-65 seed: {e}"))?
@@ -854,7 +974,12 @@ pub async fn resolve_node_identity(
         IdentityVerdict::Actor { roles }
         | IdentityVerdict::Fused { roles }
         | IdentityVerdict::OtherInfrastructure { roles } => {
-            let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+            let (signer, identity) = node_signer(
+                keystore_alias,
+                identity_dir,
+                Some(engine.federation_directory().as_ref()),
+            )
+            .await?;
             let (node_key_id, record_json) =
                 register_node_key_with_record(engine, &identity).await?;
             // The process holds the node's pen — and its public record — from
@@ -1941,7 +2066,12 @@ pub async fn provision_node_identity(
     if let Some(home) = identity_dir.parent() {
         crate::key_tier::pin_process_tier(home);
     }
-    let (signer, identity) = node_signer(keystore_alias, identity_dir).await?;
+    let (signer, identity) = node_signer(
+        keystore_alias,
+        identity_dir,
+        Some(engine.federation_directory().as_ref()),
+    )
+    .await?;
     let (key_id, record_json) = register_node_key_with_record(engine, &identity).await?;
 
     // ── The readiness gate: edge must not start on a half-provisioned identity ──
