@@ -2748,7 +2748,9 @@ async fn seat_decisions(
                             .into_iter()
                             .map(|(k, _)| k)
                             .collect();
-                        signed_by.push(proposer);
+                        if !signed_by.contains(&proposer) {
+                            signed_by.push(proposer);
+                        }
                     }
                     None if owner.key_id != v.proposer_key_id => continue,
                     None => {}
@@ -2774,6 +2776,10 @@ async fn seat_decisions(
                 "eligible": t.eligible,
                 "my_answer": my_answer,
                 "signed": signed_by.len(),
+                // Who signed, as key ids: the client draws one row per
+                // signer (CIRISClient#313). The inviter who proposed the
+                // hold is listed once; empty while nothing is held.
+                "signed_by": signed_by,
                 "reason_id": "decisions.quorum_cosign.approve_joining",
                 "says": "Approve this person joining the room.",
             }));
