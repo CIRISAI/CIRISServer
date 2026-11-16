@@ -1,6 +1,7 @@
 [package]
 name = "ciris-server"
-version = "0.5.248" # 0.5.248 (OPENED): edge v45.1.3 / persist v61.4.1 / verify v22.2.0 — a node's replication responder no longer wedges (CIRISEdge#998), heal-on-read (CIRISPersist#1271); A HOME THAT ADDS AI KEEPS ITS NODE KEY — the split adopts the bare boot's node key with the exact hybrid pair it registered (no pubkey_swap at peers), heals homes 0.5.246–0.5.247 re-keyed, refuses rather than sign a swap; the server blob source forwards edge's metrics bag (CIRISEdge#771)
+version = "0.5.249" # 0.5.249 (OPENED): edge v45.1.4 / persist v61.4.1 / verify v22.2.0 — a node back on a new transport identity is not locked out of its seat (CIRISEdge#1004), its own key goes out while it waits on others' (#1005), a member's early row in a 3+ room is released when the roster widens (#1006); a partial reset starts a new node, never half an identity (a kept Ed25519 key without its ML-DSA-65 seed is set aside; a registration conflict with another pair fails loudly; CIRISAgent 2.22.1 windows pubkey_swap); a seat decision names who signed it (`signed_by`, CIRISClient#313); the room ladder runs on the ordinary test-anchor binary (CIRIS_TEST_ROOM_LIMIT, test-anchor only)
+# 0.5.248 (TAGGED 2026-11-15, 2d0bfd35): edge v45.1.3 / persist v61.4.1 / verify v22.2.0 — a node's replication responder no longer wedges (CIRISEdge#998), heal-on-read (CIRISPersist#1271); A HOME THAT ADDS AI KEEPS ITS NODE KEY — the split adopts the bare boot's node key with the exact hybrid pair it registered (no pubkey_swap at peers), heals homes 0.5.246–0.5.247 re-keyed, refuses rather than sign a swap; the server blob source forwards edge's metrics bag (CIRISEdge#771)
 # 0.5.247 (TAGGED 2026-11-14, baf41f14): THE PROPER LTS — edge v45.1.1 / persist 61.4.0 / verify v22.2.0 (the mesh to 100 nodes, the #988 wake fix, the macOS store opens again); only the owner wipes a node; one approval seats one person; room takedown and appeal; a late joiner reads the room and approvals are signed in the mesh (rooms stay at two until the room gate is green); deferrals on the decisions queue; a harness identity TTL
 # 0.5.246 (TAGGED 2026-11-13, 9fe076b0): THE CLEAN LTS — edge v45.0.0 / persist 61.2.2 / verify v22.2.0 (the contact-add waits, the late-joiner backfill), and a desktop sign-in that waits for its browser (#868)
 # 0.5.245 (TAGGED 2026-11-09, 7af5d4eb): THE NODE SLEEPS WITH ITS PHONE — enter_background / enter_foreground: a backgrounded node pauses every periodic loop at its next tick and reports when in-flight passes have drained (steward 2026-11-01: the mobile background story; the minimum listener, CIRISServer#24 / #530)
@@ -139,7 +140,7 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
 ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.1", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.3", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.4", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -366,7 +367,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v22.2.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.3", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.4", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN

@@ -3802,6 +3802,9 @@ pub(crate) fn federation_signer(cfg: &ServerConfig) -> Result<Box<dyn HardwareSi
         // none exists, so the node self-bootstraps its federation identity.
         // Tier from the files on disk — a software-tier key is never re-opened
         // through the TPM factory, which would supersede it (CIRISServer#783).
+        // A surviving Ed25519 key whose ML-DSA-65 half is gone is half an
+        // identity: keep it aside and mint a whole new one (0.5.249).
+        crate::node_key::set_aside_half_identity(&cfg.keystore_alias, &cfg.identity_dir)?;
         crate::key_tier::ed25519_open_or_create(&cfg.keystore_alias, &cfg.identity_dir)
             .map_err(|e| anyhow::anyhow!("open-or-mint sealed-Ed25519 federation signer: {e}"))
     }

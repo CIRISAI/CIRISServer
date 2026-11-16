@@ -1294,6 +1294,33 @@ pub async fn author_community_trust(engine: &Engine) -> Result<Option<String>> {
         );
         return Ok(None);
     };
+    // Asked again while a live grant by this owner already names this node,
+    // owner and agent: answer with it. Every call signed a NEW row before
+    // 0.5.249, so a host that asks on a loop (the agent did, every ~17 s while
+    // its node waited on the canonical, CIRISAgent 2.22.1 macOS) filled the
+    // store and the canonical's send set with duplicates of one consent.
+    if let Some(live) =
+        ciris_persist::federation::community_trust_consent::community_trust_consent_for(
+            engine.federation_directory().as_ref(),
+            &node,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("read the standing community-trust grant: {e:#}"))?
+    {
+        let covers = |k: &str| live.subject_key_ids.iter().any(|s| s == k);
+        if live.attesting_key_id == pen.key_id
+            && covers(&node)
+            && covers(&pen.key_id)
+            && (agent == node || agent == pen.key_id || covers(&agent))
+        {
+            tracing::debug!(
+                attestation_id = %live.attestation_id,
+                node_key_id = %node,
+                "community-trust grant already standing — not authored again"
+            );
+            return Ok(Some(live.attestation_id));
+        }
+    }
     let row = community_trust_grant(signer, &pen.key_id, &node, &pen.key_id, Some(&agent)).await?;
     let subjects = row.subject_key_ids.clone();
     let id = crate::attest::put(engine, row)

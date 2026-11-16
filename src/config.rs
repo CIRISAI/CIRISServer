@@ -36,7 +36,7 @@ pub const DEFAULT_CIRIS_HOME: &str = "/var/lib/ciris";
 pub const DEFAULT_KEY_ID: &str = "ciris-server";
 
 /// The conventional federation-identity seed filename (under `identity_dir`).
-const SEED_FILENAME: &str = "ed25519.seed";
+pub(crate) const SEED_FILENAME: &str = "ed25519.seed";
 /// The conventional Reticulum transport-identity filename (under `identity_dir`).
 const RET_IDENTITY_FILENAME: &str = "reticulum.identity";
 

@@ -7913,7 +7913,20 @@ pub(crate) mod pending_contacts {
         since: Instant,
         /// How many times the pass re-queued the Pull.
         asked: u32,
+        /// When the pass last re-queued it (see [`requeue_backoff`]).
+        last_requeue: Option<Instant>,
         last_report: Option<Instant>,
+    }
+
+    /// How long the pass waits before re-queuing a key it already asked for:
+    /// one pass, then two, four, eight (0.5.249; CIRISEdge#1005). Edge spends
+    /// a peer's Key tick on a signer-recovery round whenever a key is queued,
+    /// and only the ordinary round offers this node's OWN key. Re-queued every
+    /// 10 s pass, while the peer would not answer a node it had not met, a
+    /// fresh node's own key never went out: its contacts never resolved and
+    /// nobody resolved it (harness/native big_room, 1 node of 3).
+    fn requeue_backoff(asked: u32) -> Duration {
+        PASS_EVERY * 2u32.pow(asked.min(3))
     }
 
     fn table() -> &'static Mutex<HashMap<Key, Pending>> {
@@ -7991,6 +8004,8 @@ pub(crate) mod pending_contacts {
                         key_id: key_id.to_owned(),
                         since: Instant::now(),
                         asked: 1,
+                        // The add itself queued the Pull.
+                        last_requeue: Some(Instant::now()),
                         last_report: None,
                     },
                 );
@@ -8531,10 +8546,24 @@ pub(crate) mod pending_contacts {
                 // Edge's recovery queue REMOVES a name when its Pull is sent, and
                 // nothing re-adds it if the reply never lands — so a single lost
                 // reply strands the contact until the person pastes again. Re-queue
-                // every pass (idempotent: the queue is keyed by name).
-                let requeued = request_key_body(&st, &key_id).await;
+                // every pass (idempotent: the queue is keyed by name) — backing
+                // off once asked, so the peer's ordinary Key round, the one that
+                // carries this node's own key, is not starved (CIRISEdge#1005).
+                let requeue_due = table().lock().expect("lock").get(&k).is_none_or(|p| {
+                    p.last_requeue
+                        .is_none_or(|at| at.elapsed() >= requeue_backoff(p.asked))
+                });
+                let requeued = if requeue_due {
+                    let queued = request_key_body(&st, &key_id).await;
+                    if let Some(p) = table().lock().expect("lock").get_mut(&k) {
+                        p.last_requeue = Some(Instant::now());
+                    }
+                    hurry("contact:key", since);
+                    queued
+                } else {
+                    false
+                };
                 let pulled = pull_key_from_peers(&st, &owner, &key_id).await;
-                hurry("contact:key", since);
                 let report = {
                     let mut t = table().lock().expect("lock");
                     t.get_mut(&k).and_then(|p| {

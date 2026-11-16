@@ -854,6 +854,11 @@ async fn a_second_members_approval_seats_the_invitee_by_cosignature() {
         (Some(1), &Value::Null),
         "{d}"
     );
+    assert_eq!(
+        d["signed_by"],
+        json!([a.owner.key_id]),
+        "who signed, by key id, not only how many: {d}"
+    );
     let (_, v) = get(a, &format!("/v1/self/decisions?circle={room}")).await;
     assert_eq!(find(&v).expect("still open")["my_answer"], "approve", "{v}");
     let (s, v) = post(b, &answer, json!({ "answer": "approve" })).await;

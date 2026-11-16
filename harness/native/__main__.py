@@ -127,6 +127,8 @@ def main() -> int:
             code = 3
         if result.get("verdict") == "FAIL":
             code = 1
+        elif result.get("verdict") == "BROKEN":
+            code = 2
         print("═══ VERDICT", json.dumps({k: v for k, v in result.items() if k not in ("steps", "results")}, indent=1))
         report = {"scenario": args.scenario, "binary": str(mesh.binary), "args": vars(args) | {"binary": str(args.binary), "work": str(args.work)},
                   **result, "nodes": mesh.state()}
