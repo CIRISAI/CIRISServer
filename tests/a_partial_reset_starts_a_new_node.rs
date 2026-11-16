@@ -67,14 +67,6 @@ fn scratch(test: &str) -> std::path::PathBuf {
     d.join("identity")
 }
 
-/// The ML-DSA-65 public key of the seed the node signs with.
-async fn node_pqc_pub(dir: &std::path::Path) -> String {
-    let s =
-        MlDsa65SoftwareSigner::from_seed_file(dir.join("node_ml_dsa_65.seed"), "probe".to_string())
-            .expect("node seed");
-    B64.encode(s.public_key().await.expect("pqc pub"))
-}
-
 async fn store() -> Arc<Engine> {
     let signer = LocalSigner::from_hardware_parts(
         Arc::new(
@@ -179,7 +171,6 @@ async fn registering_a_second_pair_under_a_held_id_is_refused() {
     .expect("identity");
     let err = ciris_server::node_key::register_node_key_with_record(&engine, &swapped)
         .await
-        .err()
-        .expect("a second pair under a held id is refused");
+        .expect_err("a second pair under a held id is refused");
     assert!(format!("{err:#}").contains("pubkey_swap"), "{err:#}");
 }
