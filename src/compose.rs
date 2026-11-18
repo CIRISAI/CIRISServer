@@ -2160,6 +2160,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 } else {
                     r.merge(crate::diag::read_router())
                 };
+                // The desktop app stops the node before it wipes the home
+                // (loopback, direct, never on a server; `local_shutdown`).
+                let r = r.merge(crate::local_shutdown::router());
                 crate::compose_status::mark("router_built");
                 r
             },
@@ -4485,6 +4488,23 @@ async fn setup_peer_replication(
     // ALIAS — reading consent by the alias returned 0 peers from a corpus whose
     // grants the signer identity authored, and the empty topology then clobbered
     // the live one (envelopes_sent=0 under a fully green transport).
+    // A split home's NODE key is the transport's occurrence, but the edge's
+    // signer is the engine's ACTOR key. Edge acts "as the node" (a call's
+    // chunk-key binding, the node co-scrub) with the signer the host hands it,
+    // so hand it the node's (CIRISEdge 45.1.6). Before this every call on an
+    // agent install failed `call.plumbing` (Eric's laptop, 2026-11-18).
+    if let Some(node_signer) = crate::node_key::held_node_edge_signer() {
+        let key = node_signer.key_id.clone();
+        match edge.set_node_signer(node_signer) {
+            Ok(()) => tracing::info!(node_key_id = %key, "edge acts as the node with the node key"),
+            Err(e) => tracing::error!(
+                node_key_id = %key,
+                error = %e,
+                "edge refused this node's signer — calls and node co-scrubs on this split home \
+                 will fail"
+            ),
+        }
+    }
     let started = start_replication_runtime(engine, edge, edge.signer_key_id()).await;
     // A newcomer gets this node's room keys at their seat, not at the next
     // content write (CC C559, #874): the seat worker listens to edge's roster

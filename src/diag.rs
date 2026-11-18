@@ -774,7 +774,7 @@ const FORWARDING_HEADERS: &[&str] = &["forwarded", "x-forwarded-for", "x-real-ip
 /// (`auth/oauth.rs` documents that deployment). A relayed request carries
 /// forwarding headers; refuse it. The canonical's Caddy forwards an allowlist
 /// of paths from another container, so this is defence in depth there.
-async fn require_direct(
+pub(crate) async fn require_direct(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

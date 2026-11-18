@@ -331,6 +331,7 @@ pub mod ingest_http;
 /// differently. Public so the gate tests can drive the fold directly.
 pub mod key_standing;
 pub mod key_tier;
+pub mod local_shutdown;
 /// Directed-consent federation peering (CIRISServer federation Round 2): mutual
 /// key registration + the `consent:replication:v1` grant that authorizes
 /// bidirectional replication with an out-of-group peer (Node B / `ciris-status`).
@@ -3383,7 +3384,8 @@ mod python {
             | E::ResolverHasNoKey
             | E::NoIdentity
             | E::ResponseAlreadyUsed(_)
-            | E::Unauthorized(_) => pyo3::exceptions::PyPermissionError::new_err(msg),
+            | E::Unauthorized(_)
+            | E::AmendmentDigestMismatch(_) => pyo3::exceptions::PyPermissionError::new_err(msg),
             E::Store(_) => pyo3::exceptions::PyRuntimeError::new_err(msg),
         }
     }
@@ -3437,18 +3439,23 @@ mod python {
     }
 
     #[pyfunction]
-    /// `ciris_server.emit_deferral_response(request_id, approved, bearer)` → the
+    /// `ciris_server.emit_deferral_response(request_id, approved, bearer,
+    /// amendment_digest)` → the
     /// response's `attestation_id` (CIRISAgent#1316). Signs
     /// `deferral:response:{approved|rejected}:v1` with the RESOLVER's own pen:
     /// `bearer` is the resolver's `sess:` token as it reached the agent. Only the
     /// node's owner (not delegated) has a pen here; anyone else raises
     /// `PermissionError("deferral.resolver_has_no_key: …")`.
-    #[pyo3(name = "emit_deferral_response", signature = (request_id, approved, bearer = None))]
+    #[pyo3(
+        name = "emit_deferral_response",
+        signature = (request_id, approved, bearer = None, amendment_digest = None)
+    )]
     fn py_emit_deferral_response(
         py: Python<'_>,
         request_id: String,
         approved: bool,
         bearer: Option<String>,
+        amendment_digest: Option<String>,
     ) -> PyResult<String> {
         py.detach(|| {
             let (engine, rt) = agent_rows_rt("emit_deferral_response")?;
@@ -3466,6 +3473,7 @@ mod python {
                 seed_dir,
                 &request_id,
                 approved,
+                amendment_digest.as_deref(),
             ))
             .map_err(agent_row_err)
         })

@@ -129,7 +129,7 @@ async fn the_deferral_round_trip_ends_in_an_amendment_citing_the_approval() {
     assert_eq!(req.attestation_envelope[ROOM_FIELD], room.as_str());
 
     // 2. The owner — the seated WA — approves, with their own pen.
-    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true)
+    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true, Some(DIGEST))
         .await
         .expect("the WA answers");
     let resp = row(&engine, &resp_id).await;
@@ -181,7 +181,7 @@ async fn a_rejected_answer_does_not_authorise_an_amendment() {
     let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
-    let resp_id = sign_deferral_response(&engine, &owner, &req_id, false)
+    let resp_id = sign_deferral_response(&engine, &owner, &req_id, false, None)
         .await
         .unwrap();
     assert_eq!(
@@ -212,7 +212,7 @@ async fn an_approval_from_someone_not_seated_is_unauthorized() {
     let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
-    let resp_id = sign_deferral_response(&engine, &stranger, &req_id, true)
+    let resp_id = sign_deferral_response(&engine, &stranger, &req_id, true, Some(DIGEST))
         .await
         .expect("anyone can sign a row; admission of the AMENDMENT is the gate");
     let err = emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
@@ -291,7 +291,7 @@ async fn the_response_door_refuses_before_opening_any_pen() {
     let (engine, agent) = owned_agent(&owner).await;
     let seed = std::env::temp_dir().join("ciris-1316-no-seed");
     // Unknown deferral: refused before the session is even read.
-    let unknown = emit_deferral_response(&engine, None, "u", seed.clone(), "nope", true)
+    let unknown = emit_deferral_response(&engine, None, "u", seed.clone(), "nope", true, None)
         .await
         .unwrap_err();
     assert_eq!(unknown.reason_id(), "deferral.unknown_request");
@@ -299,7 +299,7 @@ async fn the_response_door_refuses_before_opening_any_pen() {
     let req_id = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
-    let anon = emit_deferral_response(&engine, None, "u", seed, &req_id, true)
+    let anon = emit_deferral_response(&engine, None, "u", seed, &req_id, true, None)
         .await
         .unwrap_err();
     assert_eq!(anon.reason_id(), "deferral.not_signed_in");
@@ -395,7 +395,7 @@ async fn an_amendment_is_bound_to_its_deferral_and_used_once() {
     let mut b = request(None);
     b.deferral_id = "def-2".into();
     let req_b = emit_deferral_request(&engine, &agent, &b).await.unwrap();
-    let approves_a = sign_deferral_response(&engine, &owner, &req_a, true)
+    let approves_a = sign_deferral_response(&engine, &owner, &req_a, true, Some(DIGEST))
         .await
         .unwrap();
 
@@ -423,7 +423,7 @@ async fn deferral_rows_reads_the_chain_back_by_id() {
     let req = emit_deferral_request(&engine, &agent, &request(None))
         .await
         .unwrap();
-    let resp = sign_deferral_response(&engine, &owner, &req, true)
+    let resp = sign_deferral_response(&engine, &owner, &req, true, Some(DIGEST))
         .await
         .unwrap();
     let amend = emit_identity_amendment(&engine, &agent, DIGEST, &resp, &req)
@@ -569,10 +569,68 @@ async fn on_a_split_home_the_owners_approval_authorises_the_amendment() {
     let req_id = emit_deferral_request(&engine, &node, &request(None))
         .await
         .expect("the agent defers");
-    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true)
+    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true, Some(DIGEST))
         .await
         .expect("the owner approves");
     emit_identity_amendment(&engine, &node, DIGEST, &resp_id, &req_id)
         .await
         .expect("the owner's approval authorises the amendment on a split home");
+}
+
+/// **The amendment is the EXACT text the Wise Authority approved** (Eric
+/// 2026-11-18, CIRISAgent#1366). The approving answer carries the SHA-256 of
+/// that text, signed with the WA's pen; an amendment with another digest, or
+/// citing an answer that approved no text, is refused. No legacy grace.
+#[tokio::test]
+async fn an_amendment_is_the_exact_text_the_wa_approved() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    let other = "ef".repeat(32);
+
+    // Approved with a digest: the answer carries it, signed by the WA.
+    let req_id = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let resp_id = sign_deferral_response(&engine, &owner, &req_id, true, Some(DIGEST))
+        .await
+        .unwrap();
+    assert_eq!(
+        row(&engine, &resp_id).await.attestation_envelope["amendment_digest"],
+        DIGEST,
+        "the approved text's digest is inside the WA-signed answer"
+    );
+    // A different text is refused, by name.
+    let err = emit_identity_amendment(&engine, &agent, &other, &resp_id, &req_id)
+        .await
+        .expect_err("model-written text the WA never saw");
+    assert!(
+        matches!(err, AgentRowError::AmendmentDigestMismatch(_)),
+        "{err}"
+    );
+    assert_eq!(err.reason_id(), "amendment_digest_mismatch");
+    // The approved text lands.
+    emit_identity_amendment(&engine, &agent, DIGEST, &resp_id, &req_id)
+        .await
+        .expect("the exact approved text");
+
+    // An approval that carried no digest approved no text: refused.
+    let req2 = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let bare = sign_deferral_response(&engine, &owner, &req2, true, None)
+        .await
+        .unwrap();
+    let err = emit_identity_amendment(&engine, &agent, DIGEST, &bare, &req2)
+        .await
+        .expect_err("no grace for an answer without the text's digest");
+    assert_eq!(err.reason_id(), "amendment_digest_mismatch");
+
+    // A rejection approves no text, so it cannot carry one.
+    let req3 = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let err = sign_deferral_response(&engine, &owner, &req3, false, Some(DIGEST))
+        .await
+        .expect_err("a rejection with a digest");
+    assert_eq!(err.reason_id(), "deferral.bad_input");
 }
