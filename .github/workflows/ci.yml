@@ -432,6 +432,21 @@ jobs:
           cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor
           python3 -m pip install --quiet pyyaml
           python3 -m harness.native remote_admin --binary target/debug/ciris-server --work "$RUNNER_TEMP/remote-admin"
+      # Calls and chat on a SPLIT home, every run: the topology every agent
+      # install has (an actor key, a minted node key). Calls failed on every
+      # agent install (`call.plumbing`, 2026-11-18) while every unsplit run
+      # passed, because edge acted "as the node" with the actor's key. Each run
+      # first proves the nodes really split and that edge holds the node key,
+      # then drives the production routes: a pair room and a body, then a
+      # member call with real frames both ways, then the same call with video.
+      - name: split-home chat and calls (native mesh, Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python3 -m pip install --quiet pyyaml websocket-client
+          SPLIT_HOME=1 python3 -m harness.native chat --binary target/debug/ciris-server --work "$RUNNER_TEMP/split-chat"
+          SPLIT_HOME=1 AV_SECONDS=5 python3 -m harness.native av_member --binary target/debug/ciris-server --work "$RUNNER_TEMP/split-call"
+          SPLIT_HOME=1 AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/debug/ciris-server --work "$RUNNER_TEMP/split-video"
       # Evidence registry (CIRISServer#155 / CIRISConstitution#17): every impl:
       # pointer in evidence/cc_impl.tsv MUST resolve at the pinned crate version —
       # a moved/renamed symbol is a spec-regression failure. Runs here because the

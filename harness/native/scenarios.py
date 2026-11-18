@@ -67,6 +67,71 @@ class Steps:
 # ── chat between two PEOPLE, production routes (CIRISServer#698) ────────────
 
 
+
+# ── split homes: the topology every agent install has ───────────────────────
+
+
+def _split_home(mesh: Mesh) -> bool:
+    """`SPLIT_HOME=1` or `SPLIT_HOME=fold`: every PERSON's node boots split.
+
+    `1`: the binary, with its
+    configured key registers as an AGENT (`CIRIS_TEST_CONFIGURED_KEY_TYPE`,
+    test-anchor builds only), so the node splits through the production
+    branch: a minted node key on the wire, the actor key kept. The canonical
+    stays an ordinary node, so it is started first, before the switch is set.
+    The binary's `build_edge` signs with the node key, so this mode covers
+    split-home chat and routes, but not the edge signer.
+
+    `fold`: the agent's boot (`fold_node.py`, the library from
+    `HARNESS_FOLD_SO` or the installed wheel). This is the mode that covers
+    calls: they failed on every agent install until edge 45.1.6 (`call.plumbing`,
+    Eric's laptop, 2026-11-18) while every binary run passed."""
+    mode = os.environ.get("SPLIT_HOME", "")
+    if mode not in ("1", "fold"):
+        return False
+    if mesh.canonical is None:
+        mesh.start_canonical()
+    if mode == "fold":
+        # The agent's own boot (`fold_node.py`): the actor's engine and the
+        # embedded edge under use_node_identity, then compose on that edge.
+        # Edge's own signer is the ACTOR there, which is what broke calls.
+        mesh.fold = True
+    # Either way the configured key is the AGENT's: the harness's CLI
+    # configures the node before it boots, and must not register that key as
+    # a node first (on a real agent the agent registers it, as `agent`).
+    mesh.base_env["CIRIS_TEST_CONFIGURED_KEY_TYPE"] = "agent"
+    return True
+
+
+def _split_held(step: "Steps", nodes: List[Node]) -> bool:
+    """Each node really split, and edge acts as the node with the NODE key
+    (`Edge::set_node_signer`). Recorded as one step per node; a miss fails the
+    run by name, so a run that silently booted unsplit can never pass as a
+    split-home result."""
+    ok = True
+    for n in nodes:
+        # Compose logs both before the serve settles; give it a moment.
+        try:
+            wait_for(f"{n.name} to finish its split", lambda n=n: bool(
+                n.grep(r"edge acts as the node with the node key|edge refused this node.s signer")),
+                60, every=1)
+        except MeshError:
+            pass
+        # The binary logs the split as it mints the node key; on the fold the
+        # agent minted it first and compose reports the split home instead.
+        split = n.grep(r"the configured key is an ACTOR|this is a split home")
+        acts = n.grep(r"edge acts as the node with the node key")
+        refused = n.grep(r"edge refused this node.s signer")
+        step(f"split_home:{n.name}", split=bool(split), edge_node_signer=bool(acts),
+             refused=bool(refused))
+        if not split or not acts or refused:
+            step.fail(f"split_home_NOT:{n.name}",
+                      "the node must boot split (an actor key, a minted node key) and edge must act "
+                      "as the node with the node key", [n],
+                      r"configured key is an ACTOR|edge acts as the node|edge refused this node")
+            ok = False
+    return ok
+
 def chat(mesh: Mesh, args: Any) -> Record:
     """Two people, each on their own node, add each other and key a pair room,
     using only the routes a released node exposes. The CIRISServer#698 path."""
@@ -79,10 +144,15 @@ CHAT — two people, each on their own node, one pair room, one message (CSD-091
               only (CC 5.4.6, CIRISEdge#499) — this choice decides whether bodies can cross.
   routes:     production only — self-key-record + /v1/federation/peering, /v1/contacts, /v1/chat.
   proves, in order: boot → claim → announce → peer → owner keys cross → contacts → the same
-              room id on both → the room KEYS (the #698 claim) → a body crosses (CSD-091's row).""")
+              room id on both → the room KEYS (the #698 claim) → a body crosses (CSD-091's row).
+  SPLIT_HOME=1: both people's nodes boot split, as an agent install does.""")
+    split = _split_home(mesh)
     a = mesh.add("alice")
     b = mesh.add("bob", dial=[a] if args.direct else None)
-    step("booted", alice=a.url, bob=b.url, canonical=mesh.canonical.url, topology=topology)
+    step("booted", alice=a.url, bob=b.url, canonical=mesh.canonical.url, topology=topology,
+         split_home=split)
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
     a.claim("alice-person")
     b.claim("bob-person")
     step("claimed", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
@@ -1560,9 +1630,14 @@ def av_member(mesh: Mesh, args: Any) -> Record:
     step = Steps(f"""
 AV MEMBER — the production call routes, frames socket and events.
   proves:  join as the member → ticketed socket → {secs} s of 20 ms Opus frames both ways →
-           each hears >= 99% of the other → a leave is seen as attendee_left.""")
+           each hears >= 99% of the other → a leave is seen as attendee_left.
+  SPLIT_HOME=1: both nodes boot split, as an agent install does. AV_VIDEO=1: join with video.""")
+    split = _split_home(mesh)
+    video = os.environ.get("AV_VIDEO") == "1"
     a = mesh.add("alice")
     b = mesh.add("bob")
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
     for n in (a, b):
         n.claim(f"{n.name}-person")
         n.announce()
@@ -1583,7 +1658,7 @@ AV MEMBER — the production call routes, frames socket and events.
     step("feature_declared", features=feats)
     joins = {}
     for n in (a, b):
-        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": False})
+        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": video})
         if st != 200:
             step.fail(f"join_refused:{n.name}", "the member join was refused", [a, b],
                       r"call|join_call|CallError", status=st, body=got)

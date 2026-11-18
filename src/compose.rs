@@ -4388,6 +4388,28 @@ impl ciris_verify_core::self_at_login::SelfSigner for EngineSelfSigner {
     }
 }
 
+/// The `identity_type` the configured key registers under: `node`. A
+/// test-anchor build under `CIRIS_TESTING_MODE=true` reads
+/// `CIRIS_TEST_CONFIGURED_KEY_TYPE=agent` instead, so the configured key
+/// registers as an AGENT the way an agent install's engine key does, and
+/// [`crate::node_key::resolve_node_identity`] splits the home through its
+/// production branch (a minted node key, the actor key kept). The native mesh's
+/// split-home runs (`SPLIT_HOME=1`) use it to test calls and chat on the
+/// topology every agent install has (Eric's laptop, 2026-11-18). A production
+/// build has no such reader: the `cfg` removes it.
+fn configured_key_identity_type() -> &'static str {
+    use ciris_persist::federation::types::identity_type;
+    #[cfg(feature = "test-anchor")]
+    {
+        if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true")
+            && std::env::var("CIRIS_TEST_CONFIGURED_KEY_TYPE").as_deref() == Ok("agent")
+        {
+            return identity_type::AGENT;
+        }
+    }
+    identity_type::NODE
+}
+
 pub(crate) async fn build_self_key_record(
     engine: &Arc<Engine>,
     _cfg: &ServerConfig,
@@ -4407,7 +4429,7 @@ pub(crate) async fn build_self_key_record(
     let valid_from = chrono::Utc::now().to_rfc3339();
     let v_rec = produce_self_key_record(
         &identity,
-        ciris_persist::federation::types::identity_type::NODE,
+        configured_key_identity_type(),
         &valid_from,
         crate::identity_ttl::valid_until_str().as_deref(),
         &[],
