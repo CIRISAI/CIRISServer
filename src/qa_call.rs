@@ -181,7 +181,22 @@ async fn start(
         relay: b.relay,
         ..CallOptions::default()
     };
-    let mut call = match st.edge.join_call(&b.room, opts).await {
+    // WHO ATTENDS. Edge 45.1.7 (CIRISEdge#805 items 5-6) admits a join only
+    // when the attendee is the node itself or the node's verified owner. With
+    // no attendee named it takes the Edge's signer, which on a split home is
+    // the AGENT: an agent is neither, so every QA call on an agent install was
+    // refused `join_refused` ("<agent> is not a member of room …'s MLS group",
+    // CIRISAgent pair lane, 2026-11-19). Attend as the owner when this node
+    // holds the owner's pen, as the real call route and `echo` do; otherwise
+    // as the node itself, which is what the binary's Edge signer already is.
+    let node = crate::node_key::wire_identity()
+        .map(str::to_owned)
+        .unwrap_or_default();
+    let attendee = match crate::owner_signer_capsule::for_owned_node(&st.engine, &node).await {
+        Ok(capsule) => Some(Arc::clone(capsule.edge_signer())),
+        Err(_) => crate::node_key::held_node_edge_signer(),
+    };
+    let mut call = match st.edge.join_call_as(&b.room, opts, attendee).await {
         Ok(c) => c,
         Err(e) => return fail(StatusCode::UNPROCESSABLE_ENTITY, "join_refused", e),
     };
