@@ -740,6 +740,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     "drive.image_undecodable",
     "drive.no_rendition",
     "drive.unknown_rendition",
+    # SCREEN, APP AND WINDOW SHARING (CSD-134, 0.5.250): the share routes' two new
+    # refusals (the rest reuse call.* ids the bundle carries). Same queue.
+    "call.no_share",
+    "call.share_already_live",
     # ROOM TAKEDOWN (CC 4.5.3, 0.5.247): the takedown route's refusals. Queued for
     # the client bundle with their English; they leave at the floor that pins 0.5.247.
     "moderation.nothing_to_take_down",

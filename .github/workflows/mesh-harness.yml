@@ -407,7 +407,7 @@ jobs:
   # drives the production routes: a pair room and a body, a member call with
   # Opus frames both ways, and the same call with video.
   split-home-fold:
-    name: split-home fold (chat, call, video)
+    name: split-home fold (chat, call, video, screen share)
     needs: build
     if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -445,6 +445,9 @@ jobs:
       - name: split-home fold — video call
         if: always()
         run: SPLIT_HOME=fold AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-video"
+      - name: split-home fold — screen share
+        if: always()
+        run: SPLIT_HOME=fold AV_SECONDS=3 python3 -m harness.native av_share --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-share"
       - name: Upload node logs
         if: failure()
         uses: actions/upload-artifact@v4

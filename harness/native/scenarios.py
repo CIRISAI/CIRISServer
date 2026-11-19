@@ -1756,6 +1756,165 @@ AV MEMBER — the production call routes, frames socket and events.
     return {"verdict": "PASS", "steps": step.log}
 
 
+def av_share(mesh: Mesh, args: Any) -> Record:
+    """Desktop, app or window sharing (CSD-134; edge v45 `Call::add_stream`): two
+    people in a call, both on their call stream; alice shares her screen as a
+    SECOND stream (POST /v1/chat/{room}/call/share, its own ticketed frames
+    socket); bob sees `stream_added {kind: share}` and `share_started` with
+    alice's person, and her share frames under the share's stream id while her
+    call stream keeps flowing; alice stops (DELETE) and bob sees `share_stopped`
+    and `stream_ended`; the call goes on. SPLIT_HOME=1|fold as av_member.
+    Env AV_SECONDS (5): how long each side sends."""
+    import struct
+    import threading
+    import websocket  # websocket-client
+    secs = int(os.environ.get("AV_SECONDS", "5"))
+    step = Steps(f"""
+AV SHARE — a screen or window share beside the call (0.5.250).
+  proves:  join → share as a second stream → the other side sees it start, named and
+           kinded, and gets its frames under the share's own stream while the call
+           stream flows → stop → the other side sees it stop → the call goes on.
+  SPLIT_HOME=1|fold: both nodes boot split.""")
+    split = _split_home(mesh)
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    joins = {}
+    for n in (a, b):
+        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": True})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "the member join was refused", [a, b],
+                      r"call|join_call|CallError", status=st, body=got)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        joins[n.name] = got
+    step("joined", call_streams={k: v.get("stream_id") for k, v in joins.items()})
+
+    by_stream = {"alice": {}, "bob": {}}
+    events = {"alice": [], "bob": []}
+
+    def reader(name: str, ws: Any) -> None:
+        while True:
+            try:
+                op, data = ws.recv_data()
+            except Exception:  # noqa: BLE001
+                return
+            if op == websocket.ABNF.OPCODE_BINARY:
+                pl = struct.unpack(">H", data[5:7])[0]
+                sid = data[7 + pl:7 + pl + 32].hex()
+                by_stream[name][sid] = by_stream[name].get(sid, 0) + 1
+            elif op == websocket.ABNF.OPCODE_TEXT:
+                events[name].append(json.loads(data))
+            elif op == websocket.ABNF.OPCODE_CLOSE:
+                return
+
+    socks = {}
+    for n in (a, b):
+        url = n.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/frames?ticket=" + \
+            joins[n.name]["frames_ticket"]
+        socks[n.name] = websocket.create_connection(url, timeout=10)
+        threading.Thread(target=reader, args=(n.name, socks[n.name]), daemon=True).start()
+    wait_for("both call sockets to say ready", lambda: True if all(
+        any(e.get("type") == "ready" for e in events[n]) for n in events) else None, 60, every=0.2)
+
+    st, share = a.api("POST", f"/v1/chat/{room}/call/share", {})
+    if st != 200:
+        step.fail("share_refused", "POST …/call/share was refused", [a],
+                  r"share|add_stream|CallError", status=st, body=share)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    sid = share["stream_id"]
+    step("share_started", stream_id=sid, kind=share.get("kind"),
+         budget=share.get("frame_budget_bytes"))
+    st2, again = a.api("POST", f"/v1/chat/{room}/call/share", {})
+    step("one_share_per_device", status=st2, reason_id=(again or {}).get("reason_id"))
+    surl = a.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/share/frames?ticket=" + \
+        share["frames_ticket"]
+    share_ws = websocket.create_connection(surl, timeout=10)
+    op, first = share_ws.recv_data()
+    share_ready = json.loads(first) if op == websocket.ABNF.OPCODE_TEXT else {}
+    step("share_socket_ready", ready=share_ready)
+
+    call_frame = bytes([1, 0xFF, 0, 0, 0]) + b"\x01" * 120
+    screen_frame = bytes([1, 0xFF, 0, 0, 0]) + b"\x02" * 900
+    sent = {"call": 0, "share": 0}
+    t0 = time.time()
+    tick = 0
+    while time.time() - t0 < secs:
+        socks["alice"].send_binary(call_frame)
+        sent["call"] += 1
+        if tick % 2 == 0:
+            share_ws.send_binary(screen_frame)
+            sent["share"] += 1
+        tick += 1
+        time.sleep(max(0.0, t0 + tick * 0.02 - time.time()))
+    time.sleep(2)
+    bob_share = by_stream["bob"].get(sid, 0)
+    bob_call = by_stream["bob"].get(joins["alice"]["stream_id"], 0)
+    started = next((e for e in events["bob"] if e.get("type") == "share_started"), {})
+    added = next((e for e in events["bob"] if e.get("type") == "stream_added"
+                  and e.get("stream_id") == sid), {})
+    step("bob_sees_the_share", share_frames=bob_share, share_sent=sent["share"],
+         call_frames=bob_call, call_sent=sent["call"], share_started=started,
+         stream_added=added, streams=by_stream["bob"])
+
+    st3, stopped = a.api("DELETE", f"/v1/chat/{room}/call/share")
+    step("share_stopped_by_alice", status=st3, answer=stopped)
+    try:
+        wait_for("bob to see share_stopped", lambda: True if any(
+            e.get("type") == "share_stopped" for e in events["bob"]) else None, 30, every=0.5)
+    except MeshError:
+        pass
+    stopped_ev = next((e for e in events["bob"] if e.get("type") == "share_stopped"), {})
+    ended_ev = next((e for e in events["bob"] if e.get("type") == "stream_ended"
+                     and e.get("stream_id") == sid), {})
+    before = by_stream["bob"].get(joins["alice"]["stream_id"], 0)
+    for _ in range(50):
+        socks["alice"].send_binary(call_frame)
+        time.sleep(0.02)
+    time.sleep(2)
+    call_after = by_stream["bob"].get(joins["alice"]["stream_id"], 0) - before
+    _, gs = a.api("GET", f"/v1/chat/{room}/call")
+    step("after_the_share", share_stopped=stopped_ev, stream_ended=ended_ev,
+         call_frames_after=call_after, call_live=(gs or {}).get("live"))
+    for ws in (*socks.values(), share_ws):
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+    ok = (share.get("kind") == "share" and st2 == 409
+          and (again or {}).get("reason_id") == "call.share_already_live"
+          and share_ready.get("type") == "ready"
+          and bob_share >= 0.95 * sent["share"] and bob_call >= 0.95 * sent["call"]
+          and started.get("person") == a.owner_key_id and added.get("kind") == "share"
+          and st3 == 200 and stopped_ev.get("stream_id") == sid
+          and call_after >= 45)
+    record = {"scenario": "av_share", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "versions": _versions(), "seconds": secs, "sent": sent,
+              "bob_received": {"share": bob_share, "call": bob_call}, "split_home": split,
+              "verdict": "PASS" if ok else "FAIL"}
+    _evidence(record, "av_share")
+    if not ok:
+        step.fail("screen_share", "the share must start, cross under its own stream beside the "
+                  "call, and stop, with the call going on", [a, b], r"share|stream|publish")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
 def decisions(mesh: Mesh, args: Any) -> Record:
     """The pending-decisions queue's first kind (0.5.246): in a room of two, a third
     person's accepted invitation shows to BOTH members as "approve joining" with the
@@ -3934,6 +4093,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "big_room": big_room,
     "av_mesh": av_mesh,
     "av_member": av_member,
+    "av_share": av_share,
     "decisions": decisions,
     "av_echo": av_echo,
     "pair_unannounced": pair_unannounced,

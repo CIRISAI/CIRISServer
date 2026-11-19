@@ -152,7 +152,7 @@ if [ "$FAST" = "0" ]; then
   # Calls and chat on a SPLIT home (an actor key, a minted node key), as every
   # agent install runs. Uses the binary remote-admin-mesh builds (same lane).
   L3+=( "split-home-mesh" \
-        "python3 -m pip install --quiet pyyaml websocket-client && SPLIT_HOME=1 python3 -m harness.native chat --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-chat\" && SPLIT_HOME=1 AV_SECONDS=5 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-call\" && SPLIT_HOME=1 AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-video\"" )
+        "python3 -m pip install --quiet pyyaml websocket-client && SPLIT_HOME=1 python3 -m harness.native chat --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-chat\" && SPLIT_HOME=1 AV_SECONDS=5 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-call\" && SPLIT_HOME=1 AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-video\" && SPLIT_HOME=1 AV_SECONDS=3 python3 -m harness.native av_share --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-share\"" )
 fi
 
 # Lane 4 builds nothing, so it needs no target dir and always runs alongside.
