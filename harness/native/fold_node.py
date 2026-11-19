@@ -101,11 +101,21 @@ def main() -> int:
 
     node_key_id = ciris_server.provision_node_identity(a.key_id, str(ident))
     log(f"node identity provisioned: {node_key_id} (the actor {a.key_id} keeps its own key)")
+    peers = [p for p in a.peers.split(",") if p]
+    # The direct-link facilitator: the binary's compose defaults it to the
+    # first bootstrap peer (`compose::direct_links`), and the canonical serves
+    # one. The PyO3 init takes it only when named (or from the baked
+    # production canonical, which a test trust root gates off). Without it,
+    # two members two hops apart never get a direct link, and a call's
+    # derived A/V destination answers a one-hop neighbour only: both join,
+    # and no leg ever forms (CIRISEdge, 2026-11-19).
+    facilitator = os.environ.get("HARNESS_FOLD_FACILITATOR") or (peers[0] if peers else None)
     edge = init_edge_runtime(
         engine,
         str(home / "edge_identity.rid"),
         listen_addr=a.listen,
-        bootstrap_peers=[p for p in a.peers.split(",") if p],
+        bootstrap_peers=peers,
+        direct_link_facilitator=facilitator,
         agent_mode="server",
         enable_transport=True,
         use_node_identity=True,
