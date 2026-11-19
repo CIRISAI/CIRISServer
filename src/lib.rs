@@ -525,6 +525,7 @@ pub mod self_identity;
 pub mod sign_object;
 pub mod system_data;
 pub mod telemetry_logs;
+pub mod telemetry_otlp;
 #[cfg(feature = "test-anchor")]
 mod test_bless;
 /// CIRISServer#369 follow-on — **the periodic reader for the trace-plane band.**

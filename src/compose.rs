@@ -2100,6 +2100,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.home.join("logs"),
                     ))
+                    // GET /v1/telemetry/otlp/metrics — edge's telemetry as OTLP
+                    // JSON, operator-gated like the logs (the client's call "?"
+                    // panel reads the per-leg series from here).
+                    .merge(crate::telemetry_otlp::router(
+                        Arc::clone(&engine),
+                        edge.metrics(),
+                        this_node.clone(),
+                    ))
                     // Data page: owner-gated data wipe (reset-account = data-only;
                     // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
                     .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()));
