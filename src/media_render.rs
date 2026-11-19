@@ -19,6 +19,11 @@
 //!   long edge) and a thumbnail (≤ 320 px), plus [`info`]'s dimensions and
 //!   thumbhash `placeholder` (≤ 64 decoded bytes, CC 3.3.13).
 //!
+//! **Animation** (Eric, 2026-11-18): an animated GIF, WebP or APNG stays
+//! animated, in the canonical bytes and in a rendition. A reader picks how it
+//! plays ([`Play`]): on a loop, once and then stop, or as a still (its first
+//! frame). Animated output is GIF, the one animated format `image` encodes.
+//!
 //! **Caps are the published policy's** ([`crate::media_gate::policy`]'s
 //! `tier_a`): bytes and pixels per type. They are checked from the header
 //! BEFORE any pixel is decoded, and `image`'s allocation limit backs them. An
@@ -40,8 +45,8 @@ const CANONICAL_QUALITY: u8 = 90;
 /// The decoder's allocation ceiling, behind the per-type pixel caps:
 /// 33 MP × 4 bytes is 132 MB, so this is headroom, not the limit.
 const MAX_ALLOC: u64 = 256 * 1024 * 1024;
-/// An animated GIF keeps at most this many frames when canonicalised.
-const MAX_GIF_FRAMES: usize = 500;
+/// An animation keeps at most this many frames.
+pub const MAX_ANIMATED_FRAMES: usize = 500;
 
 /// An image type this node decodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,6 +136,8 @@ pub struct Encoded {
     pub media_type: &'static str,
     pub width: u32,
     pub height: u32,
+    /// True for an animated GIF (more than one frame).
+    pub animated: bool,
 }
 
 /// Which rendition.
@@ -167,8 +174,19 @@ impl Size {
 pub struct Info {
     pub width: u32,
     pub height: u32,
-    /// Base64 (standard, padded) thumbhash, at most 25 bytes before encoding.
+    /// Base64 (standard, padded) thumbhash of the first frame, upright, at
+    /// most 25 bytes before encoding.
     pub placeholder: String,
+    /// `Some` for an animated GIF, WebP or APNG.
+    pub animation: Option<Animation>,
+}
+
+/// An animation's length.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Animation {
+    pub frames: usize,
+    /// One play through, the sum of the frame delays.
+    pub duration_ms: u64,
 }
 
 fn limits() -> Limits {
@@ -247,71 +265,195 @@ fn encode_still(img: &DynamicImage, quality: u8) -> Result<Encoded, RenderRefusa
         media_type,
         width,
         height,
+        animated: false,
     })
 }
 
-/// An animated GIF re-encoded frame by frame: the frames and their delays
-/// survive, every extension block does not. A still GIF goes through
-/// [`encode_still`] instead.
-fn canonical_gif(bytes: &[u8]) -> Result<Option<Encoded>, RenderRefusal> {
-    let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(bytes)).map_err(undecodable)?;
-    let (w, h) = decoder.dimensions();
-    let (_, max_pixels) = Kind::Gif.caps();
-    let pixels = u64::from(w) * u64::from(h);
-    if pixels > max_pixels {
-        return Err(RenderRefusal::TooLarge {
-            what: "pixels",
-            got: pixels,
-            cap: max_pixels,
-        });
-    }
-    let mut frames = Vec::new();
-    for frame in decoder.into_frames() {
-        if frames.len() == MAX_GIF_FRAMES {
-            return Err(RenderRefusal::TooLarge {
-                what: "frames",
-                got: (MAX_GIF_FRAMES + 1) as u64,
-                cap: MAX_GIF_FRAMES as u64,
-            });
-        }
-        frames.push(frame.map_err(undecodable)?);
-    }
-    if frames.len() <= 1 {
-        return Ok(None);
-    }
-    let mut out = Vec::new();
-    {
-        let mut enc = image::codecs::gif::GifEncoder::new(&mut out);
-        enc.set_repeat(image::codecs::gif::Repeat::Infinite)
-            .map_err(undecodable)?;
-        enc.encode_frames(frames).map_err(undecodable)?;
-    }
-    Ok(Some(Encoded {
-        bytes: out,
-        media_type: "image/gif",
-        width: w,
-        height: h,
-    }))
+/// How an animated image plays: on a loop, once and then stops on its last
+/// frame, or not at all (its first frame, as a still).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Play {
+    Loop,
+    Once,
+    Still,
 }
 
-/// The sender's canonical form: upright and re-encoded, carrying no metadata.
-/// JPEG at quality 90 (PNG when any pixel is transparent) for a still image;
-/// an animated GIF stays an animated GIF. The result is at full resolution.
+impl Play {
+    pub fn parse(s: &str) -> Option<Play> {
+        match s {
+            "loop" => Some(Play::Loop),
+            "once" => Some(Play::Once),
+            "still" => Some(Play::Still),
+            _ => None,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Play::Loop => "loop",
+            Play::Once => "once",
+            Play::Still => "still",
+        }
+    }
+}
+
+/// An animated image's frame canvas may be at most this many pixels, from
+/// any of the three animated formats: the published GIF cap (`tier_a`).
+pub const ANIMATED_MAX_PIXELS: u64 = 921_600;
+/// The decoded frames of one animation, all together, stay under the
+/// decoder's allocation ceiling: frames x width x height x 4 bytes.
+const ANIMATED_MAX_DECODED: u64 = MAX_ALLOC;
+/// GIF quantisation speed (1 slowest .. 30 fastest); 10 keeps a chat GIF's
+/// colours and encodes in well under a second.
+const GIF_SPEED: i32 = 10;
+
+/// An animation's frames, composited to full canvases, or `None` when the
+/// image is a still (one frame, or a format with no animation in it).
+/// GIF, animated WebP and APNG. The canvas and the decoded total are capped
+/// before and while decoding, so a long animation is refused, not truncated.
+fn decode_frames(bytes: &[u8], kind: Kind) -> Result<Option<Vec<image::Frame>>, RenderRefusal> {
+    use image::codecs::{gif::GifDecoder, png::PngDecoder, webp::WebPDecoder};
+    let canvas = |w: u32, h: u32| -> Result<u64, RenderRefusal> {
+        let pixels = u64::from(w) * u64::from(h);
+        if pixels > ANIMATED_MAX_PIXELS {
+            return Err(RenderRefusal::TooLarge {
+                what: "pixels per animated frame",
+                got: pixels,
+                cap: ANIMATED_MAX_PIXELS,
+            });
+        }
+        Ok(pixels)
+    };
+    let frames: image::Frames<'_> = match kind {
+        Kind::Jpeg => return Ok(None),
+        Kind::Gif => {
+            let mut d = GifDecoder::new(Cursor::new(bytes)).map_err(undecodable)?;
+            d.set_limits(limits()).map_err(undecodable)?;
+            let (w, h) = d.dimensions();
+            canvas(w, h)?;
+            d.into_frames()
+        }
+        Kind::Webp => {
+            let mut d = WebPDecoder::new(Cursor::new(bytes)).map_err(undecodable)?;
+            if !d.has_animation() {
+                return Ok(None);
+            }
+            d.set_limits(limits()).map_err(undecodable)?;
+            let (w, h) = d.dimensions();
+            canvas(w, h)?;
+            d.into_frames()
+        }
+        Kind::Png => {
+            let mut d = PngDecoder::new(Cursor::new(bytes)).map_err(undecodable)?;
+            if !d.is_apng().map_err(undecodable)? {
+                return Ok(None);
+            }
+            d.set_limits(limits()).map_err(undecodable)?;
+            let (w, h) = d.dimensions();
+            canvas(w, h)?;
+            d.apng().map_err(undecodable)?.into_frames()
+        }
+    };
+    let mut out = Vec::new();
+    let mut decoded: u64 = 0;
+    for frame in frames {
+        let frame = frame.map_err(undecodable)?;
+        if out.len() == MAX_ANIMATED_FRAMES {
+            return Err(RenderRefusal::TooLarge {
+                what: "frames",
+                got: (MAX_ANIMATED_FRAMES + 1) as u64,
+                cap: MAX_ANIMATED_FRAMES as u64,
+            });
+        }
+        let buf = frame.buffer();
+        decoded += u64::from(buf.width()) * u64::from(buf.height()) * 4;
+        if decoded > ANIMATED_MAX_DECODED {
+            return Err(RenderRefusal::TooLarge {
+                what: "decoded bytes of animation",
+                got: decoded,
+                cap: ANIMATED_MAX_DECODED,
+            });
+        }
+        out.push(frame);
+    }
+    Ok((out.len() > 1).then_some(out))
+}
+
+/// Frames as an animated GIF, the one animated format this node encodes.
+/// `Loop` writes the loop-forever extension; `Once` writes none, so a viewer
+/// plays the frames once and stops on the last. Frame delays are kept.
+fn encode_animation(frames: Vec<image::Frame>, play: Play) -> Result<Encoded, RenderRefusal> {
+    use image::codecs::gif::{GifEncoder, Repeat};
+    let (width, height) = frames
+        .first()
+        .map(|f| (f.buffer().width(), f.buffer().height()))
+        .unwrap_or((0, 0));
+    let mut out = Vec::new();
+    {
+        let mut enc = GifEncoder::new_with_speed(&mut out, GIF_SPEED);
+        if play == Play::Loop {
+            enc.set_repeat(Repeat::Infinite).map_err(undecodable)?;
+        }
+        enc.encode_frames(frames).map_err(undecodable)?;
+    }
+    Ok(Encoded {
+        bytes: out,
+        media_type: "image/gif",
+        width,
+        height,
+        animated: true,
+    })
+}
+
+/// Each frame scaled to fit `edge` on its long side (never up), its delay
+/// and offset kept.
+fn scale_frames(frames: Vec<image::Frame>, edge: u32) -> Vec<image::Frame> {
+    frames
+        .into_iter()
+        .map(|f| {
+            let (w, h) = (f.buffer().width(), f.buffer().height());
+            if w <= edge && h <= edge {
+                return f;
+            }
+            let delay = f.delay();
+            let img = DynamicImage::ImageRgba8(f.into_buffer())
+                .resize(edge, edge, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+            image::Frame::from_parts(img, 0, 0, delay)
+        })
+        .collect()
+}
+
+/// The sender's canonical form: upright and re-encoded, carrying no metadata,
+/// at full resolution. A still is JPEG at quality 90 (PNG when any pixel is
+/// transparent). An animation (GIF, animated WebP, APNG) stays animated: an
+/// animated GIF that loops, its frames and delays kept, every extension
+/// block dropped. GIF is the one animated format this node encodes, so an
+/// animated WebP or APNG arrives in the room as a GIF.
 pub fn canonicalize(bytes: &[u8], essence: &str) -> Result<Encoded, RenderRefusal> {
     let kind = admit(bytes, essence)?;
-    if kind == Kind::Gif {
-        if let Some(animated) = canonical_gif(bytes)? {
-            return Ok(animated);
-        }
+    if let Some(frames) = decode_frames(bytes, kind)? {
+        return encode_animation(frames, Play::Loop);
     }
     let img = decode_still(bytes, kind)?;
     encode_still(&img, CANONICAL_QUALITY)
 }
 
-/// A rendition for a reader: the first frame, upright, scaled to fit `size`'s
-/// long edge (never up), JPEG at quality 85 or PNG when transparent.
-pub fn render(bytes: &[u8], essence: &str, size: Size) -> Result<Encoded, RenderRefusal> {
+/// A rendition for a reader, scaled to fit `size`'s long edge (never up).
+/// A still is JPEG at quality 85, or PNG when transparent. An animation
+/// plays as `play` says: `Loop` and `Once` are an animated GIF, and `Still`
+/// is its first frame encoded as a still.
+pub fn render(
+    bytes: &[u8],
+    essence: &str,
+    size: Size,
+    play: Play,
+) -> Result<Encoded, RenderRefusal> {
     let kind = admit(bytes, essence)?;
+    if play != Play::Still {
+        if let Some(frames) = decode_frames(bytes, kind)? {
+            return encode_animation(scale_frames(frames, size.max_edge()), play);
+        }
+    }
     let img = decode_still(bytes, kind)?;
     let edge = size.max_edge();
     let img = if img.width() > edge || img.height() > edge {
@@ -322,11 +464,25 @@ pub fn render(bytes: &[u8], essence: &str, size: Size) -> Result<Encoded, Render
     encode_still(&img, RENDITION_QUALITY)
 }
 
-/// The image's upright dimensions and its thumbhash placeholder.
+/// The image's upright dimensions, whether it is animated (frame count and
+/// one loop's length), and a thumbhash placeholder of its first frame.
 pub fn info(bytes: &[u8], essence: &str) -> Result<Info, RenderRefusal> {
     let kind = admit(bytes, essence)?;
     let img = decode_still(bytes, kind)?;
     let (width, height) = (img.width(), img.height());
+    let animation = decode_frames(bytes, kind)?.map(|frames| {
+        let ms: u64 = frames
+            .iter()
+            .map(|f| {
+                let (n, d) = f.delay().numer_denom_ms();
+                u64::from(n) / u64::from(d.max(1))
+            })
+            .sum();
+        Animation {
+            frames: frames.len(),
+            duration_ms: ms,
+        }
+    });
     // thumbhash takes at most 100 x 100.
     let small = img.thumbnail(100, 100).to_rgba8();
     let hash = thumbhash::rgba_to_thumb_hash(
@@ -339,6 +495,7 @@ pub fn info(bytes: &[u8], essence: &str) -> Result<Info, RenderRefusal> {
         width,
         height,
         placeholder: base64::engine::general_purpose::STANDARD.encode(hash),
+        animation,
     })
 }
 
@@ -390,8 +547,8 @@ pub struct Cache {
 
 #[derive(Default)]
 struct CacheInner {
-    map: std::collections::BTreeMap<(String, &'static str), Cached>,
-    order: std::collections::VecDeque<(String, &'static str)>,
+    map: std::collections::BTreeMap<(String, String), Cached>,
+    order: std::collections::VecDeque<(String, String)>,
     used: usize,
 }
 
@@ -407,18 +564,21 @@ impl Cache {
         }
     }
 
-    pub fn get(&self, digest: &str, what: &'static str) -> Option<Cached> {
+    pub fn get(&self, digest: &str, what: &str) -> Option<Cached> {
         let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        inner.map.get(&(digest.to_owned(), what)).cloned()
+        inner
+            .map
+            .get(&(digest.to_owned(), what.to_owned()))
+            .cloned()
     }
 
-    pub fn put(&self, digest: &str, what: &'static str, value: Cached) {
+    pub fn put(&self, digest: &str, what: &str, value: Cached) {
         let w = value.weight();
         if w > self.budget {
             return;
         }
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        let key = (digest.to_owned(), what);
+        let key = (digest.to_owned(), what.to_owned());
         if let Some(old) = inner.map.insert(key.clone(), value) {
             inner.used -= old.weight();
             inner.order.retain(|k| k != &key);
@@ -453,6 +613,7 @@ mod tests {
                 media_type: "image/jpeg",
                 width: 1,
                 height: 1,
+                animated: false,
             }))
         };
         c.put("a", "thumb", img(60));
@@ -546,12 +707,12 @@ mod tests {
     #[test]
     fn renditions_fit_their_edge_and_never_upscale() {
         let big = jpeg_of(3000, 1000);
-        let d = render(&big, "image/jpeg", Size::Display).unwrap();
+        let d = render(&big, "image/jpeg", Size::Display, Play::Loop).unwrap();
         assert_eq!((d.width, d.height), (2048, 683));
-        let t = render(&big, "image/jpeg", Size::Thumb).unwrap();
+        let t = render(&big, "image/jpeg", Size::Thumb, Play::Loop).unwrap();
         assert_eq!(t.width, 320);
         let small = jpeg_of(100, 50);
-        let d = render(&small, "image/jpeg", Size::Display).unwrap();
+        let d = render(&small, "image/jpeg", Size::Display, Play::Loop).unwrap();
         assert_eq!((d.width, d.height), (100, 50));
     }
 
@@ -604,7 +765,7 @@ mod tests {
             png.extend_from_slice(&crc32(tag).to_be_bytes());
         }
         for f in [
-            render(&png, "image/png", Size::Thumb),
+            render(&png, "image/png", Size::Thumb, Play::Loop),
             canonicalize(&png, "image/png"),
         ] {
             match f {
@@ -623,7 +784,7 @@ mod tests {
     #[test]
     fn other_types_and_broken_bytes_are_named() {
         assert_eq!(
-            render(b"<svg/>", "image/svg+xml", Size::Thumb)
+            render(b"<svg/>", "image/svg+xml", Size::Thumb, Play::Loop)
                 .unwrap_err()
                 .reason_id(),
             "drive.no_rendition"
@@ -631,33 +792,155 @@ mod tests {
         let mut broken = jpeg_of(16, 16);
         broken.truncate(40);
         assert_eq!(
-            render(&broken, "image/jpeg", Size::Thumb)
+            render(&broken, "image/jpeg", Size::Thumb, Play::Loop)
                 .unwrap_err()
                 .reason_id(),
             "drive.image_undecodable"
         );
     }
 
-    #[test]
-    fn an_animated_gif_keeps_its_frames() {
+    fn animated_gif(frames: u8, w: u32, h: u32) -> Vec<u8> {
         use image::{Delay, Frame};
-        let frames: Vec<Frame> = (0..3)
+        let frames: Vec<Frame> = (0..frames)
             .map(|i| {
                 Frame::from_parts(
-                    RgbaImage::from_pixel(4, 4, Rgba([i * 80, 0, 0, 255])),
+                    RgbaImage::from_pixel(w, h, Rgba([i.wrapping_mul(80), 40, 200, 255])),
                     0,
                     0,
                     Delay::from_numer_denom_ms(100, 1),
                 )
             })
             .collect();
-        let mut src = Vec::new();
-        image::codecs::gif::GifEncoder::new(&mut src)
-            .encode_frames(frames)
-            .unwrap();
-        let c = canonicalize(&src, "image/gif").unwrap();
+        let mut out = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 30);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            enc.encode_frames(frames).unwrap();
+        }
+        out
+    }
+
+    /// An APNG of `frames` frames, 4 x 4, 100 ms each, looping forever.
+    fn apng(frames: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, 4, 4);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.set_animated(u32::from(frames), 0).unwrap();
+            enc.set_frame_delay(1, 10).unwrap();
+            let mut w = enc.write_header().unwrap();
+            for i in 0..frames {
+                w.write_image_data(&[i.wrapping_mul(60), 0, 0, 255].repeat(16))
+                    .unwrap();
+            }
+            w.finish().unwrap();
+        }
+        out
+    }
+
+    fn frame_count(gif: &[u8]) -> usize {
+        image::codecs::gif::GifDecoder::new(Cursor::new(gif))
+            .unwrap()
+            .into_frames()
+            .count()
+    }
+
+    /// The NETSCAPE2.0 application extension is what makes a GIF loop.
+    fn loops(gif: &[u8]) -> bool {
+        contains(gif, b"NETSCAPE2.0")
+    }
+
+    #[test]
+    fn an_animated_gif_stays_animated_and_loops_in_the_room() {
+        let c = canonicalize(&animated_gif(3, 4, 4), "image/gif").unwrap();
         assert_eq!(c.media_type, "image/gif");
-        let back = image::codecs::gif::GifDecoder::new(Cursor::new(&c.bytes)).unwrap();
-        assert_eq!(back.into_frames().count(), 3);
+        assert_eq!(frame_count(&c.bytes), 3);
+        assert!(loops(&c.bytes));
+    }
+
+    #[test]
+    fn a_reader_picks_loop_once_or_still() {
+        let src = animated_gif(3, 64, 32);
+        let looping = render(&src, "image/gif", Size::Display, Play::Loop).unwrap();
+        assert_eq!(
+            (looping.media_type, frame_count(&looping.bytes)),
+            ("image/gif", 3)
+        );
+        assert!(loops(&looping.bytes), "loop: the loop-forever extension");
+        let once = render(&src, "image/gif", Size::Display, Play::Once).unwrap();
+        assert_eq!(frame_count(&once.bytes), 3);
+        assert!(
+            !loops(&once.bytes),
+            "once: no loop extension, so it stops on the last frame"
+        );
+        let still = render(&src, "image/gif", Size::Display, Play::Still).unwrap();
+        assert_eq!(
+            still.media_type, "image/jpeg",
+            "still: the first frame, as a still"
+        );
+        // Frames scale like a still does.
+        let thumb = render(
+            &animated_gif(2, 640, 320),
+            "image/gif",
+            Size::Thumb,
+            Play::Loop,
+        )
+        .unwrap();
+        assert_eq!((thumb.width, thumb.height), (320, 160));
+        assert_eq!(frame_count(&thumb.bytes), 2);
+    }
+
+    #[test]
+    fn an_apng_animates_too() {
+        let src = apng(4);
+        let c = canonicalize(&src, "image/png").unwrap();
+        assert_eq!(
+            c.media_type, "image/gif",
+            "GIF is the animated format this node encodes"
+        );
+        assert_eq!(frame_count(&c.bytes), 4);
+        let r = render(&src, "image/png", Size::Thumb, Play::Once).unwrap();
+        assert_eq!(frame_count(&r.bytes), 4);
+        let i = info(&src, "image/png").unwrap();
+        let a = i.animation.expect("animated");
+        assert_eq!((a.frames, a.duration_ms), (4, 400));
+        // A plain PNG is a still.
+        assert!(info(&apng(1), "image/png").unwrap().animation.is_none());
+    }
+
+    #[test]
+    fn info_says_whether_and_how_long_it_animates() {
+        let a = info(&animated_gif(5, 8, 8), "image/gif")
+            .unwrap()
+            .animation
+            .unwrap();
+        assert_eq!((a.frames, a.duration_ms), (5, 500));
+        assert!(info(&jpeg_of(8, 8), "image/jpeg")
+            .unwrap()
+            .animation
+            .is_none());
+    }
+
+    #[test]
+    fn a_long_animation_is_refused_not_truncated() {
+        let src = animated_gif((MAX_ANIMATED_FRAMES + 1).min(255) as u8, 2, 2);
+        // 255 frames is under the frame cap: it renders whole.
+        assert_eq!(
+            frame_count(
+                &render(&src, "image/gif", Size::Thumb, Play::Loop)
+                    .unwrap()
+                    .bytes
+            ),
+            255
+        );
+        // At the canvas cap (960 x 960 = 921,600 px), 80 frames decode to
+        // 80 x 921,600 x 4 bytes, about 295 MB: over the 256 MiB budget.
+        let big = animated_gif(80, 960, 960);
+        match render(&big, "image/gif", Size::Thumb, Play::Loop) {
+            Err(RenderRefusal::TooLarge { .. }) => {}
+            other => panic!("expected a refusal, got {:?}", other.map(|e| e.bytes.len())),
+        }
     }
 }

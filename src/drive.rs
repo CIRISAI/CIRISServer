@@ -3066,8 +3066,8 @@ fn content_disposition(filename: Option<&str>) -> HeaderValue {
 /// A streamed body's FIRST item is awaited before the status line, so a
 /// refusal the probe could not foresee is still a status; a failure after it
 /// tears the body (see `drive/streaming.rs`).
-/// `GET /v1/files/{id}/rendition` — `?size=display|thumb|info`, plus the
-/// read's `cohort` / `room_id`.
+/// `GET /v1/files/{id}/rendition` — `?size=display|thumb|info` and
+/// `?play=loop|once|still`, plus the read's `cohort` / `room_id`.
 #[derive(Debug, Deserialize)]
 pub struct RenditionQuery {
     #[serde(default)]
@@ -3076,6 +3076,13 @@ pub struct RenditionQuery {
     pub room_id: Option<String>,
     #[serde(default)]
     pub size: Option<String>,
+    #[serde(default)]
+    pub play: Option<String>,
+}
+
+/// The cache key of one rendition.
+fn rendition_key(size: crate::media_render::Size, play: crate::media_render::Play) -> String {
+    format!("{}:{}", size.as_str(), play.as_str())
 }
 
 /// `GET /v1/files/{attestation_id}/rendition` (CIRISServer#614): THIS node's
@@ -3083,15 +3090,23 @@ pub struct RenditionQuery {
 ///
 /// - `size=display` (default): ≤ 2048 px on the long edge;
 /// - `size=thumb`: ≤ 320 px;
-/// - `size=info`: JSON `{width, height, placeholder, derived_from}`, where
-///   `placeholder` is the CC 3.3.13 thumbhash (base64).
+/// - `size=info`: JSON `{width, height, placeholder, animation, derived_from,
+///   renditions}`; `placeholder` is the CC 3.3.13 thumbhash (base64) of the
+///   first frame, and `renditions` lists each size's plays with the SHA-256 of
+///   any already made;
+/// - `play=loop` (default), `once` or `still`, for an animated GIF, WebP or
+///   APNG: an animated GIF that loops forever, one that plays once and stops
+///   on its last frame, or the first frame as a still. A still image ignores it.
 ///
-/// The image answers are JPEG, or PNG when any pixel is transparent, with
-/// `X-Ciris-Width` / `X-Ciris-Height` and `X-Ciris-Derived-From`
-/// (`sha-256=<hex>`, the original's plaintext digest). Access is exactly
-/// `GET /v1/files/{id}`'s: session, room, membership, moderation, then the
-/// whole read. The rendition cache is in memory and is consulted only after
-/// that check.
+/// The image answers are JPEG, PNG when any pixel is transparent, or GIF when
+/// animated. Headers: `X-Ciris-Width` / `X-Ciris-Height`,
+/// `X-Ciris-Rendition-Sha256` (hex of exactly these bytes, so a client checks
+/// them before any decoder sees them), `X-Ciris-Derived-From`
+/// (`sha-256=<hex>`, the original's plaintext digest) and `X-Ciris-Play`.
+/// A rendition is made synchronously, on the first GET, under the node's two
+/// decode slots: there is no pending state. Access is exactly
+/// `GET /v1/files/{id}`'s (session, room, membership, moderation, the whole
+/// read), and the in-memory cache is consulted only after that check.
 async fn file_rendition(
     State(st): State<DriveState>,
     headers: HeaderMap,
@@ -3109,6 +3124,19 @@ async fn file_rendition(
                     StatusCode::BAD_REQUEST,
                     "drive.unknown_rendition",
                     format!("size={other:?}: a rendition is display, thumb or info"),
+                )
+            }
+        },
+    };
+    let play = match rq.play.as_deref() {
+        None => mr::Play::Loop,
+        Some(p) => match mr::Play::parse(p) {
+            Some(p) => p,
+            None => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "drive.unknown_rendition",
+                    format!("play={p:?}: an animation plays loop, once or still"),
                 )
             }
         },
@@ -3158,19 +3186,31 @@ async fn file_rendition(
         return render_refusal(&mr::RenderRefusal::NotRenderable(essence));
     }
     let digest = plaintext_digest(&bytes);
-    let what = size.map_or("info", mr::Size::as_str);
-    let cached = match mr::CACHE.get(&digest, what) {
+    let what = match size {
+        Some(s) => rendition_key(s, play),
+        None => "info".to_owned(),
+    };
+    let cached = match mr::CACHE.get(&digest, &what) {
         Some(hit) => hit,
         None => {
             let (owned, ess) = (bytes, essence.clone());
             let made = mr::decode_bounded(move || match size {
-                Some(s) => mr::render(&owned, &ess, s).map(|e| mr::Cached::Image(Arc::new(e))),
+                Some(s) => {
+                    mr::render(&owned, &ess, s, play).map(|e| mr::Cached::Image(Arc::new(e)))
+                }
                 None => mr::info(&owned, &ess).map(|i| mr::Cached::Info(Arc::new(i))),
             })
             .await;
             match made {
                 Ok(c) => {
-                    mr::CACHE.put(&digest, what, c.clone());
+                    mr::CACHE.put(&digest, &what, c.clone());
+                    // A still image plays one way: file it under `still` too,
+                    // so `info` can name its digest whatever play was asked.
+                    if let (Some(s), mr::Cached::Image(e)) = (size, &c) {
+                        if !e.animated && play != mr::Play::Still {
+                            mr::CACHE.put(&digest, &rendition_key(s, mr::Play::Still), c.clone());
+                        }
+                    }
                     c
                 }
                 Err(r) => return render_refusal(&r),
@@ -3179,23 +3219,42 @@ async fn file_rendition(
     };
     let derived = format!("sha-256={digest}");
     match cached {
-        mr::Cached::Info(i) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "attestation_id": found.file.attestation_id,
-                "media_type": essence,
-                "width": i.width,
-                "height": i.height,
-                "placeholder": i.placeholder,
-                "placeholder_alg": "thumbhash",
-                "derived_from": {"content_digest": digest, "content_digest_alg": "sha-256"},
-                "renditions": {
-                    "display": {"max_edge": mr::DISPLAY_MAX_EDGE},
-                    "thumb": {"max_edge": mr::THUMB_MAX_EDGE},
-                },
-            })),
-        )
-            .into_response(),
+        mr::Cached::Info(i) => {
+            let plays: &[mr::Play] = if i.animation.is_some() {
+                &[mr::Play::Loop, mr::Play::Once, mr::Play::Still]
+            } else {
+                &[mr::Play::Still]
+            };
+            let size_entry = |s: mr::Size, max_edge: u32| {
+                let mut by_play = serde_json::Map::new();
+                for p in plays {
+                    let sha = match mr::CACHE.get(&digest, &rendition_key(s, *p)) {
+                        Some(mr::Cached::Image(e)) => Some(plaintext_digest(&e.bytes)),
+                        _ => None,
+                    };
+                    by_play.insert(p.as_str().to_owned(), serde_json::json!({ "sha256": sha }));
+                }
+                serde_json::json!({ "max_edge": max_edge, "plays": by_play })
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "attestation_id": found.file.attestation_id,
+                    "media_type": essence,
+                    "width": i.width,
+                    "height": i.height,
+                    "placeholder": i.placeholder,
+                    "placeholder_alg": "thumbhash",
+                    "animation": i.animation,
+                    "derived_from": {"content_digest": digest, "content_digest_alg": "sha-256"},
+                    "renditions": {
+                        "display": size_entry(mr::Size::Display, mr::DISPLAY_MAX_EDGE),
+                        "thumb": size_entry(mr::Size::Thumb, mr::THUMB_MAX_EDGE),
+                    },
+                })),
+            )
+                .into_response()
+        }
         mr::Cached::Image(e) => {
             let mut h = HeaderMap::new();
             h.insert(header::CONTENT_TYPE, HeaderValue::from_static(e.media_type));
@@ -3205,10 +3264,14 @@ async fn file_rendition(
             );
             h.insert("x-ciris-width", HeaderValue::from(e.width));
             h.insert("x-ciris-height", HeaderValue::from(e.height));
-            h.insert(
-                "x-ciris-derived-from",
-                HeaderValue::from_str(&derived).unwrap_or_else(|_| HeaderValue::from_static("")),
-            );
+            if let Ok(v) = HeaderValue::from_str(&plaintext_digest(&e.bytes)) {
+                h.insert("x-ciris-rendition-sha256", v);
+            }
+            if let Ok(v) = HeaderValue::from_str(&derived) {
+                h.insert("x-ciris-derived-from", v);
+            }
+            let played = if e.animated { play } else { mr::Play::Still };
+            h.insert("x-ciris-play", HeaderValue::from_static(played.as_str()));
             h.insert(
                 "x-content-type-options",
                 HeaderValue::from_static("nosniff"),

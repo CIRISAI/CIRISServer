@@ -1270,6 +1270,7 @@ dependencies = [
  "libc",
  "libsqlite3-sys",
  "pbkdf2",
+ "png",
  "pyo3",
  "rcgen",
  "reqwest",

@@ -336,6 +336,8 @@ libsqlite3-sys = { version = "0.39", features = ["bundled"] }
 # ed25519-dalek MUST match persist's locked 2.x (the SigningKey type crosses the
 # Engine::with_signer / put_public_key API boundary).
 [dev-dependencies]
+# An animated PNG (APNG) fixture for src/media_render.rs; same version `image` pulls in.
+png = "0.18"
 # Generate the mock YubiKey PIV attestation chain (root → f9 → 9c, Ed25519, with
 # the Yubico firmware/touch/FIPS extension OIDs) the CC 4.2.2.1 hardware-class
 # gate test drives (tests/hardware_class_admission.rs, CIRISServer#159). Nobody

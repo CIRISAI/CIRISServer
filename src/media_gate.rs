@@ -348,9 +348,17 @@ pub fn policy() -> serde_json::Value {
             "types": ["image/jpeg", "image/png", "image/webp", "image/gif"],
             "display_max_edge": crate::media_render::DISPLAY_MAX_EDGE,
             "thumb_max_edge": crate::media_render::THUMB_MAX_EDGE,
-            "formats": "image/jpeg; image/png when any pixel is transparent",
-            "placeholder": "thumbhash, base64, on size=info",
-            "first_frame_only": ["image/gif", "image/webp"],
+            "formats": "image/jpeg; image/png when any pixel is transparent; image/gif when animated",
+            "placeholder": "thumbhash, base64, of the first frame, on size=info",
+            // Animated GIF, WebP and APNG stay animated (Eric 2026-11-18): the
+            // reader picks how one plays; a still image ignores it.
+            "animated": ["image/gif", "image/webp", "image/png"],
+            "play": ["loop", "once", "still"],
+            "play_default": "loop",
+            "animated_max_frames": crate::media_render::MAX_ANIMATED_FRAMES,
+            "animated_max_pixels": crate::media_render::ANIMATED_MAX_PIXELS,
+            "rendition_sha256_header": "X-Ciris-Rendition-Sha256",
+            "made": "synchronously on the first GET; no pending state",
             "canonicalised_at_sender": "family and community rooms; self keeps the original",
         },
     })

@@ -2326,9 +2326,159 @@ impl Fx {
                 .to_owned()
         };
         let (ct, w, ht) = (h("content-type"), h("x-ciris-width"), h("x-ciris-height"));
+        let sha = h("x-ciris-rendition-sha256");
         let body = resp.bytes().await.expect("body").to_vec();
+        use sha2::Digest as _;
+        assert_eq!(
+            sha,
+            hex::encode(sha2::Sha256::digest(&body)),
+            "X-Ciris-Rendition-Sha256 is the digest of exactly these bytes"
+        );
         (s, ct, w.parse().unwrap_or(0), ht.parse().unwrap_or(0), body)
     }
+
+    /// The play a rendition answered with (`X-Ciris-Play`).
+    async fn played(&self, id: &str, query: &str) -> String {
+        let resp = self
+            .client
+            .get(format!("{}/v1/files/{id}/rendition?{query}", self.base))
+            .bearer_auth(&self.owner)
+            .send()
+            .await
+            .expect("rendition GET");
+        resp.headers()
+            .get("x-ciris-play")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned()
+    }
+}
+
+/// A looping GIF of `frames` frames, 8 x 8, 100 ms each.
+fn looping_gif(frames: u8) -> Vec<u8> {
+    let frames: Vec<image::Frame> = (0..frames)
+        .map(|i| {
+            image::Frame::from_parts(
+                image::RgbaImage::from_pixel(8, 8, image::Rgba([i * 60, 10, 200, 255])),
+                0,
+                0,
+                image::Delay::from_numer_denom_ms(100, 1),
+            )
+        })
+        .collect();
+    let mut out = Vec::new();
+    {
+        let mut enc = image::codecs::gif::GifEncoder::new_with_speed(&mut out, 30);
+        enc.set_repeat(image::codecs::gif::Repeat::Infinite)
+            .unwrap();
+        enc.encode_frames(frames).unwrap();
+    }
+    out
+}
+
+fn gif_frames(gif: &[u8]) -> usize {
+    use image::AnimationDecoder as _;
+    image::codecs::gif::GifDecoder::new(std::io::Cursor::new(gif))
+        .unwrap()
+        .into_frames()
+        .count()
+}
+
+/// Eric 2026-11-18: an animated image animates, and the reader chooses to
+/// loop it, play it once, or stop it (a still). A GIF crosses a chat room
+/// still animated; every reader's node serves the three plays.
+#[tokio::test]
+async fn an_animated_gif_animates_and_the_reader_picks_loop_once_or_still() {
+    let fx = fixture().await;
+    let room = fx.owners_community("gifs", &[]).await;
+    let in_room = format!("cohort=community&room_id={room}");
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "community", "room_id": room, "bytes_base64": b64(&looping_gif(4)),
+                "media_type": "image/gif", "filename": "wave.gif",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().unwrap().to_owned();
+    let sent = fx.read_bytes(&id, &in_room).await;
+    assert_eq!(gif_frames(&sent), 4, "the canonical GIF is still animated");
+    assert!(holds(&sent, b"NETSCAPE2.0"), "and still loops");
+
+    let (s, ct, _, _, looped) = fx.rendition(&id, &format!("size=thumb&{in_room}")).await;
+    assert_eq!((s, ct.as_str()), (200, "image/gif"), "loop is the default");
+    assert_eq!(gif_frames(&looped), 4);
+    assert!(holds(&looped, b"NETSCAPE2.0"));
+    assert_eq!(
+        fx.played(&id, &format!("size=thumb&{in_room}")).await,
+        "loop"
+    );
+
+    let (_, ct, _, _, once) = fx
+        .rendition(&id, &format!("size=thumb&play=once&{in_room}"))
+        .await;
+    assert_eq!((ct.as_str(), gif_frames(&once)), ("image/gif", 4));
+    assert!(
+        !holds(&once, b"NETSCAPE2.0"),
+        "once: plays through and stops"
+    );
+
+    let (_, ct, _, _, _) = fx
+        .rendition(&id, &format!("size=thumb&play=still&{in_room}"))
+        .await;
+    assert_eq!(ct, "image/jpeg", "still: the first frame");
+
+    let (s, v) = fx
+        .get(&format!(
+            "/v1/files/{id}/rendition?size=thumb&play=bounce&{in_room}"
+        ))
+        .await;
+    assert_eq!((s, reason(&v)), (400, "drive.unknown_rendition"), "{v}");
+
+    let (_, info) = fx
+        .get(&format!("/v1/files/{id}/rendition?size=info&{in_room}"))
+        .await;
+    assert_eq!(info["animation"]["frames"], 4, "{info}");
+    assert_eq!(info["animation"]["duration_ms"], 400, "{info}");
+    let thumb_plays = &info["renditions"]["thumb"]["plays"];
+    use sha2::Digest as _;
+    assert_eq!(
+        thumb_plays["loop"]["sha256"],
+        hex::encode(sha2::Sha256::digest(&looped)),
+        "info names the digest of each rendition already made: {info}"
+    );
+    assert!(thumb_plays["once"]["sha256"].is_string());
+    assert!(
+        info["renditions"]["display"]["plays"]["loop"]["sha256"].is_null(),
+        "not made yet"
+    );
+
+    // A still image plays one way.
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "community", "room_id": room, "bytes_base64": b64(&phone_photo(16, 16)),
+                "media_type": "image/jpeg",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let photo = v["attestation_id"].as_str().unwrap().to_owned();
+    assert_eq!(
+        fx.played(&photo, &format!("size=thumb&{in_room}")).await,
+        "still"
+    );
+    let (_, info) = fx
+        .get(&format!("/v1/files/{photo}/rendition?size=info&{in_room}"))
+        .await;
+    assert!(info["animation"].is_null(), "{info}");
+    assert!(
+        info["renditions"]["thumb"]["plays"]["still"]["sha256"].is_string(),
+        "{info}"
+    );
 }
 
 /// CIRISServer#614 (Eric 2026-11-18: renditions are part of chat). A photo
