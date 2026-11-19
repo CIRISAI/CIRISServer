@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.250" # 0.5.250 (OPENED): edge v45.1.6 / persist v61.4.1 / verify v22.2.0 — calls work on a split home (edge acts as the node with the node key; every agent install failed `call.plumbing`), a star room's key wraps reach every member (CIRISEdge#1014); an identity amendment is the exact text the Wise Authority approved (`amendment_digest`, `amendment_digest_mismatch`); the desktop app can stop the node before a reset (POST /v1/system/local-shutdown, loopback only)
+version = "0.5.250" # 0.5.250 (OPENED): edge v45.1.7 / persist v61.4.2 / verify v22.2.0 — VIDEO CALLS ON AN AGENT INSTALL: calls work on a split home (edge acts as the node with the node key; every agent install failed `call.plumbing`), the capsule routes every directory call it stubbed (persist 61.4.2), the first bootstrap peer facilitates direct links on the fold (edge 45.1.7); share a screen, an app or a window in a call (CSD-134); image renditions for chat and drive (display / thumb / thumbhash; GIF, WebP and APNG animate with loop, once or still; a shared photo loses its location); per-call leg metrics over GET /v1/telemetry/otlp/metrics; a star room's key wraps reach every member (CIRISEdge#1014); an identity amendment is the exact text the Wise Authority approved (`amendment_digest`, `amendment_digest_mismatch`); the desktop app can stop the node before a reset (POST /v1/system/local-shutdown, loopback only)
 # 0.5.249 (TAGGED 2026-11-16, b450b969): edge v45.1.4 / persist v61.4.1 / verify v22.2.0 — a node back on a new transport identity is not locked out of its seat (CIRISEdge#1004), its own key goes out while it waits on others' (#1005), a member's early row in a 3+ room is released when the roster widens (#1006); a partial reset starts a new node, never half an identity (a kept Ed25519 key without its ML-DSA-65 seed is set aside; a registration conflict with another pair fails loudly; CIRISAgent 2.22.1 windows pubkey_swap); a seat decision names who signed it (`signed_by`, CIRISClient#313); the room ladder runs on the ordinary test-anchor binary (CIRIS_TEST_ROOM_LIMIT, test-anchor only)
 # 0.5.248 (TAGGED 2026-11-15, 2d0bfd35): edge v45.1.3 / persist v61.4.1 / verify v22.2.0 — a node's replication responder no longer wedges (CIRISEdge#998), heal-on-read (CIRISPersist#1271); A HOME THAT ADDS AI KEEPS ITS NODE KEY — the split adopts the bare boot's node key with the exact hybrid pair it registered (no pubkey_swap at peers), heals homes 0.5.246–0.5.247 re-keyed, refuses rather than sign a swap; the server blob source forwards edge's metrics bag (CIRISEdge#771)
 # 0.5.247 (TAGGED 2026-11-14, baf41f14): THE PROPER LTS — edge v45.1.1 / persist 61.4.0 / verify v22.2.0 (the mesh to 100 nodes, the #988 wake fix, the macOS store opens again); only the owner wipes a node; one approval seats one person; room takedown and appeal; a late joiner reads the room and approvals are signed in the mesh (rooms stay at two until the room gate is green); deferrals on the decisions queue; a harness identity TTL
@@ -140,8 +140,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.1", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.6", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", rev = "0c57515a0140d8667770dc9d2b48c38845556980", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -285,7 +285,7 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.1", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
@@ -314,7 +314,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v22.2.0
 # `full_traces` at Detailed and RELABELS the trace `detailed`, loudly. A mobile
 # node therefore never ships content claiming a scrub it did not receive; it
 # simply cannot offer the NER tier.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.1", features = ["scrub-ner"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["scrub-ner"] }
 serialport = "4"
 
 # libsqlite3-sys (pulled by persist's `sqlite` feature) links the SYSTEM libsqlite3
@@ -374,7 +374,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v22.2.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.6", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", rev = "0c57515a0140d8667770dc9d2b48c38845556980", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN
@@ -386,7 +386,7 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.6",
 # without one. Pre-genesis is now a supported boot mode, not a test seam, and an Engine built
 # that way reports `GenesisPosture::PreGenesis` while every ROOT_REQUIRING_GATES gate refuses
 # with `NoConstitutionalRootYet`. A node that trusts nothing is not a node that checks nothing.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.1" }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2" }
 
 # The QA runner exercises the family/accord ceremony surfaces against a
 # CONTROLLABLE roster — holders it can sign as. persist v31.0.0 made roster growth

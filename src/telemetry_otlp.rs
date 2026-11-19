@@ -115,6 +115,7 @@ fn ucum(u: Unit) -> &'static str {
         Unit::Milliseconds => "ms",
         Unit::Nanoseconds => "ns",
         Unit::Bytes => "By",
+        Unit::BitsPerSecond => "bit/s",
     }
 }
 
