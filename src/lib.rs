@@ -355,6 +355,8 @@ pub mod file_custody;
 /// The final genesis ceremony routes (`FSD/FINAL_GENESIS.md`).
 pub mod final_genesis;
 pub mod media_gate;
+#[forbid(unsafe_code)]
+pub mod media_render;
 pub mod mls_guard;
 /// The owner's own devices (`FSD/ROSTER_AND_DRIVE_CRUD.md` §2): release a node
 /// from its owner (a signed `withdraws` of the owner-binding) and relabel a

@@ -1158,6 +1158,70 @@ fn write_gate(media_type: &str, head: &[u8], filename: Option<&str>) -> Result<G
     })
 }
 
+/// THE IMAGE INGEST (CIRISServer#614, Eric 2026-11-18): an image written into
+/// a SHARED room (family or community, so chat) is canonicalised here, at the
+/// sender's node, before it is hashed and sealed. Upright, re-encoded, no
+/// EXIF, GPS, XMP or ICC (`media_render::canonicalize`; CC 3.3.13 "sender
+/// canonicalises before hashing"). A photo's location never leaves the phone.
+/// A `self` file keeps its original bytes: it goes only to the owner's own
+/// devices, and a backup should be the photo as taken.
+fn canonicalizes(cohort: Cohort, essence: &str) -> Option<crate::media_render::Kind> {
+    if cohort == Cohort::SelfCollective {
+        return None;
+    }
+    crate::media_render::Kind::of(essence)
+}
+
+/// A refused decode, by name: not a rendered type 415, over a cap 413, bytes
+/// that do not decode 422.
+fn render_refusal(r: &crate::media_render::RenderRefusal) -> Response {
+    use crate::media_render::RenderRefusal as R;
+    // Each id spelled at the call, so the localization guard sees it
+    // (`tools/check_server_localization.py` reads `refuse(…, "<id>", …)`).
+    match r {
+        R::NotRenderable(_) => refuse(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "drive.no_rendition",
+            r.detail(),
+        ),
+        R::TooLarge { .. } => refuse(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "drive.image_too_large",
+            r.detail(),
+        ),
+        R::Undecodable(_) => refuse(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "drive.image_undecodable",
+            r.detail(),
+        ),
+    }
+}
+
+/// `name` with the extension of `media_type`, when canonicalising changed the
+/// type (a WebP photo becomes a JPEG; an opaque PNG does too).
+fn named_for(name: Option<&str>, media_type: &str) -> Option<String> {
+    let ext = match media_type {
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/gif" => "gif",
+        _ => return name.map(str::to_owned),
+    };
+    name.map(|n| {
+        let stem = match n.rsplit_once('.') {
+            Some((stem, old)) if !stem.is_empty() => {
+                let same = old.eq_ignore_ascii_case(ext)
+                    || (ext == "jpg" && old.eq_ignore_ascii_case("jpeg"));
+                if same {
+                    return n.to_owned();
+                }
+                stem
+            }
+            _ => n,
+        };
+        format!("{stem}.{ext}")
+    })
+}
+
 /// A new file row in `room` from bytes in hand: [`write_gate`], then
 /// [`publish_gated`] over the slice.
 #[allow(clippy::result_large_err)] // the Err IS an axum Response
@@ -1174,6 +1238,40 @@ async fn publish_into(
     plane: Plane,
 ) -> Result<(files::PublishedFile, bool), Response> {
     let gated = write_gate(media_type, bytes, filename)?;
+    if canonicalizes(cohort, &gated.media_type).is_some() {
+        let (owned, essence) = (bytes.to_vec(), gated.media_type.clone());
+        let canonical = crate::media_render::decode_bounded(move || {
+            crate::media_render::canonicalize(&owned, &essence)
+        })
+        .await
+        .map_err(|r| render_refusal(&r))?;
+        let canonical_gate = Gated {
+            media_type: canonical.media_type.to_owned(),
+            filename: named_for(gated.filename.as_deref(), canonical.media_type),
+        };
+        tracing::info!(
+            room = %room,
+            from = %gated.media_type,
+            to = canonical.media_type,
+            bytes_in = bytes.len(),
+            bytes_out = canonical.bytes.len(),
+            width = canonical.width,
+            height = canonical.height,
+            "drive: an image entering a shared room was canonicalised (upright, no metadata)"
+        );
+        return publish_gated(
+            st,
+            headers,
+            owner_key_id,
+            cohort,
+            room,
+            &canonical_gate,
+            canonical.bytes.len() as u64,
+            canonical.bytes.as_slice(),
+            plane,
+        )
+        .await;
+    }
     publish_gated(
         st,
         headers,
@@ -1303,6 +1401,55 @@ async fn publish_upload(
                 Ok(head) => write_gate(media_type, head, filename)?,
                 Err(f) => return Err(multipart_refusal(&f)),
             };
+            // An image for a shared room is canonicalised whole, so collect it
+            // (it is at most its type's published byte cap) and take the
+            // in-hand path.
+            if let Some(kind) = canonicalizes(cohort, &gated.media_type) {
+                let (cap, _) = kind.caps();
+                if declared > cap {
+                    return Err(render_refusal(
+                        &crate::media_render::RenderRefusal::TooLarge {
+                            what: "bytes",
+                            got: declared,
+                            cap,
+                        },
+                    ));
+                }
+                use tokio::io::AsyncReadExt as _;
+                let mut whole = Vec::with_capacity(declared as usize);
+                let read = (&mut *body)
+                    .take(declared + 1)
+                    .read_to_end(&mut whole)
+                    .await;
+                if let Some(f) = body.failure() {
+                    return Err(multipart_refusal(f));
+                }
+                if let Err(e) = read {
+                    return Err(bad_body(format!("read the image part: {e}")));
+                }
+                if whole.len() as u64 != declared {
+                    return Err(refuse(
+                        StatusCode::BAD_REQUEST,
+                        "drive.declared_length_mismatch",
+                        format!(
+                            "declared {declared} bytes, the file part held {}",
+                            whole.len()
+                        ),
+                    ));
+                }
+                return publish_into(
+                    st,
+                    headers,
+                    owner_key_id,
+                    cohort,
+                    room,
+                    &whole,
+                    media_type,
+                    filename,
+                    Plane::Drive,
+                )
+                .await;
+            }
             let out = publish_gated(
                 st,
                 headers,
@@ -2919,37 +3066,187 @@ fn content_disposition(filename: Option<&str>) -> HeaderValue {
 /// A streamed body's FIRST item is awaited before the status line, so a
 /// refusal the probe could not foresee is still a status; a failure after it
 /// tears the body (see `drive/streaming.rs`).
-async fn read_file(
+/// `GET /v1/files/{id}/rendition` — `?size=display|thumb|info`, plus the
+/// read's `cohort` / `room_id`.
+#[derive(Debug, Deserialize)]
+pub struct RenditionQuery {
+    #[serde(default)]
+    pub cohort: Option<String>,
+    #[serde(default)]
+    pub room_id: Option<String>,
+    #[serde(default)]
+    pub size: Option<String>,
+}
+
+/// `GET /v1/files/{attestation_id}/rendition` (CIRISServer#614): THIS node's
+/// rendition of an image file, so a client never decodes the original.
+///
+/// - `size=display` (default): ≤ 2048 px on the long edge;
+/// - `size=thumb`: ≤ 320 px;
+/// - `size=info`: JSON `{width, height, placeholder, derived_from}`, where
+///   `placeholder` is the CC 3.3.13 thumbhash (base64).
+///
+/// The image answers are JPEG, or PNG when any pixel is transparent, with
+/// `X-Ciris-Width` / `X-Ciris-Height` and `X-Ciris-Derived-From`
+/// (`sha-256=<hex>`, the original's plaintext digest). Access is exactly
+/// `GET /v1/files/{id}`'s: session, room, membership, moderation, then the
+/// whole read. The rendition cache is in memory and is consulted only after
+/// that check.
+async fn file_rendition(
     State(st): State<DriveState>,
     headers: HeaderMap,
     Path(attestation_id): Path<String>,
-    Query(q): Query<FileQuery>,
+    Query(rq): Query<RenditionQuery>,
 ) -> Response {
-    let Some(owner) = crate::drive_auth::owner(&st, &headers).await else {
-        return drive_no_session();
+    use crate::media_render as mr;
+    let size_token = rq.size.as_deref().unwrap_or("display");
+    let size = match size_token {
+        "info" => None,
+        other => match mr::Size::parse(other) {
+            Some(s) => Some(s),
+            None => {
+                return refuse(
+                    StatusCode::BAD_REQUEST,
+                    "drive.unknown_rendition",
+                    format!("size={other:?}: a rendition is display, thumb or info"),
+                )
+            }
+        },
     };
-    let (_, room) = match room_from_query(&st, &owner.key_id, &q).await {
-        Ok(r) => r,
+    let q = FileQuery {
+        cohort: rq.cohort.clone(),
+        room_id: rq.room_id.clone(),
+        raw: None,
+    };
+    let (found, described, viewer) = match open_for_viewer(&st, &headers, &attestation_id, &q).await
+    {
+        Ok(v) => v,
         Err(e) => return e,
     };
-    let found = match find_file(&st, &owner.key_id, &room, &attestation_id, Plane::Drive).await {
-        Ok(f) => f,
+    let (bytes, _) = match open_whole(&st, &found, &viewer).await {
+        Ok(b) => b,
         Err(e) => return e,
     };
-    // A FLAGGED FILE OPENS ONLY FOR A VIEWER WHO CHOSE TO SEE IT — whole or
-    // raw, the bytes are the same bytes.
+    // CC 5.3.2.6: the sniffed type must BE the declared type. A row whose
+    // type stayed sealed is rendered as what its bytes are, if that is an
+    // image this node decodes.
+    let essence = match described.media_type.as_deref() {
+        Some(declared) => match crate::media_gate::check_format(declared, &bytes) {
+            Ok(e) => e,
+            Err(crate::media_gate::TypeRefusal::Mismatch { declared, sniffed }) => {
+                return refuse_with(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "drive.format_mismatch",
+                    format!("declared {declared}, but the bytes are {sniffed}"),
+                    serde_json::json!({ "declared": declared, "sniffed": sniffed }),
+                )
+            }
+            Err(crate::media_gate::TypeRefusal::BadEssence(d)) => {
+                return render_refusal(&mr::RenderRefusal::NotRenderable(d))
+            }
+        },
+        None => match crate::media_gate::sniff(&bytes) {
+            Some(s) => s.to_owned(),
+            None => {
+                return render_refusal(&mr::RenderRefusal::NotRenderable(
+                    "an unrecognised type".into(),
+                ))
+            }
+        },
+    };
+    if mr::Kind::of(&essence).is_none() {
+        return render_refusal(&mr::RenderRefusal::NotRenderable(essence));
+    }
+    let digest = plaintext_digest(&bytes);
+    let what = size.map_or("info", mr::Size::as_str);
+    let cached = match mr::CACHE.get(&digest, what) {
+        Some(hit) => hit,
+        None => {
+            let (owned, ess) = (bytes, essence.clone());
+            let made = mr::decode_bounded(move || match size {
+                Some(s) => mr::render(&owned, &ess, s).map(|e| mr::Cached::Image(Arc::new(e))),
+                None => mr::info(&owned, &ess).map(|i| mr::Cached::Info(Arc::new(i))),
+            })
+            .await;
+            match made {
+                Ok(c) => {
+                    mr::CACHE.put(&digest, what, c.clone());
+                    c
+                }
+                Err(r) => return render_refusal(&r),
+            }
+        }
+    };
+    let derived = format!("sha-256={digest}");
+    match cached {
+        mr::Cached::Info(i) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "attestation_id": found.file.attestation_id,
+                "media_type": essence,
+                "width": i.width,
+                "height": i.height,
+                "placeholder": i.placeholder,
+                "placeholder_alg": "thumbhash",
+                "derived_from": {"content_digest": digest, "content_digest_alg": "sha-256"},
+                "renditions": {
+                    "display": {"max_edge": mr::DISPLAY_MAX_EDGE},
+                    "thumb": {"max_edge": mr::THUMB_MAX_EDGE},
+                },
+            })),
+        )
+            .into_response(),
+        mr::Cached::Image(e) => {
+            let mut h = HeaderMap::new();
+            h.insert(header::CONTENT_TYPE, HeaderValue::from_static(e.media_type));
+            h.insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, max-age=3600"),
+            );
+            h.insert("x-ciris-width", HeaderValue::from(e.width));
+            h.insert("x-ciris-height", HeaderValue::from(e.height));
+            h.insert(
+                "x-ciris-derived-from",
+                HeaderValue::from_str(&derived).unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+            h.insert(
+                "x-content-type-options",
+                HeaderValue::from_static("nosniff"),
+            );
+            (StatusCode::OK, h, e.bytes.clone()).into_response()
+        }
+    }
+}
+
+/// The access every read of a file's bytes goes through: a session, the
+/// room, the row as the owner sees it, the room's moderation, this node's
+/// key. Answers the file, its descriptor and the viewer key.
+#[allow(clippy::result_large_err)] // the Err IS an axum Response
+async fn open_for_viewer(
+    st: &DriveState,
+    headers: &HeaderMap,
+    attestation_id: &str,
+    q: &FileQuery,
+) -> Result<(Found, Described, String), Response> {
+    let Some(owner) = crate::drive_auth::owner(st, headers).await else {
+        return Err(drive_no_session());
+    };
+    let (_, room) = room_from_query(st, &owner.key_id, q).await?;
+    let found = find_file(st, &owner.key_id, &room, attestation_id, Plane::Drive).await?;
+    // A FLAGGED FILE OPENS ONLY FOR A VIEWER WHO CHOSE TO SEE IT: whole, raw
+    // or rendered, the bytes are the same bytes.
     match moderation_of(
-        &st,
+        st,
         &mut crate::room_moderation::DutyCache::default(),
         &room,
-        &attestation_id,
+        attestation_id,
         &found.file.attesting_key_id,
         &owner.key_id,
     )
     .await
     {
         Ok(Some(m)) if m.withheld => {
-            return refuse(
+            return Err(refuse(
                 StatusCode::FORBIDDEN,
                 "drive.withheld_by_moderation",
                 format!(
@@ -2957,22 +3254,33 @@ async fn read_file(
                      (POST /v1/chat/{{room}}/items/{{id}}/reveal) to open it",
                     m.flag.unwrap_or("reported")
                 ),
-            )
+            ))
         }
         Ok(_) => {}
-        Err(e) => return e,
+        Err(e) => return Err(e),
     }
-    let viewer = match viewer_key(&st).await {
+    let viewer = viewer_key(st).await.map_err(|e| {
+        refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "drive.no_node_key",
+            format!("resolve this node's key: {e}"),
+        )
+    })?;
+    let described = describe(st, &found.file, &viewer).await;
+    Ok((found, described, viewer))
+}
+
+async fn read_file(
+    State(st): State<DriveState>,
+    headers: HeaderMap,
+    Path(attestation_id): Path<String>,
+    Query(q): Query<FileQuery>,
+) -> Response {
+    let (found, described, viewer) = match open_for_viewer(&st, &headers, &attestation_id, &q).await
+    {
         Ok(v) => v,
-        Err(e) => {
-            return refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "drive.no_node_key",
-                format!("resolve this node's key: {e}"),
-            )
-        }
+        Err(e) => return e,
     };
-    let described = describe(&st, &found.file, &viewer).await;
     if !truthy(q.raw.as_deref()) {
         return match open_whole(&st, &found, &viewer).await {
             Ok((bytes, _)) => (
@@ -3546,6 +3854,15 @@ async fn move_file(
                 },
                 Err(e) => return read_refusal(&e),
             };
+            // Above the whole-read cap is above every image type's byte cap,
+            // so an image this size cannot enter a shared room canonicalised.
+            if let Some(kind) = canonicalizes(target_cohort, &gated.media_type) {
+                return render_refusal(&crate::media_render::RenderRefusal::TooLarge {
+                    what: "bytes",
+                    got: total,
+                    cap: kind.caps().0,
+                });
+            }
             let out = publish_gated(
                 &st,
                 &headers,
@@ -4113,6 +4430,7 @@ pub fn router(
             get(read_file).put(replace_file).delete(withdraw_file),
         )
         .route("/v1/files/{attestation_id}/meta", get(file_meta))
+        .route("/v1/files/{attestation_id}/rendition", get(file_rendition))
         .route("/v1/files/{attestation_id}/custody", get(file_custody))
         .route("/v1/files/{attestation_id}/rename", post(rename_file))
         .route("/v1/files/{attestation_id}/move", post(move_file))

@@ -206,6 +206,10 @@ fs2       = "0.4"   # available-disk check for realistic-minimum feature gating
 # read-API listener. axum pinned to lens-core's 0.8 so the merged Router unifies.
 axum       = { version = "0.8", features = ["ws"] }
 base64     = "0.22"
+# Image renditions (#614): the four pure-Rust codecs only (zune-jpeg, png,
+# image-webp, gif). No avif/heic (C decoders), no rayon. src/media_render.rs.
+image      = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+thumbhash  = "0.1"
 serde      = { version = "1", features = ["derive"] } # holonomic scoreboard model (benchmarks::)
 serde_json = "1"
 # glibc's own allocator accounting (`mallinfo2`), for the one question no read
@@ -556,6 +560,7 @@ debug = "line-tables-only"
 
 [profile.test]
 debug = "line-tables-only"
+
 
 
 

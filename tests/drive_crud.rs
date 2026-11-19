@@ -1480,7 +1480,9 @@ async fn the_media_policy_is_published() {
         .expect("policy GET without a session");
     assert_eq!(resp.status().as_u16(), 200);
     let v: serde_json::Value = resp.json().await.expect("json");
-    assert_eq!(v["renditions"], false);
+    // 0.5.250 (#614): this node renders images.
+    assert_eq!(v["renditions"], true);
+    assert_eq!(v["rendition"]["thumb_max_edge"], 320);
     assert_eq!(v["tier_a"]["image/jpeg"]["max_pixels"], 33_000_000);
     assert!(v["tier_b_convert_at_sender"]
         .as_array()
@@ -2273,4 +2275,187 @@ async fn a_flagged_room_file_is_withheld_and_stays_in_the_room() {
         .expect("listed");
     assert!(entry["moderation"]["flag"].is_null(), "cleared: {entry}");
     assert_eq!(entry["moderation"]["withheld"], false, "{entry}");
+}
+
+/// A JPEG of `w` x `h` with an APP1 Exif block carrying orientation 6 (turn
+/// 90° clockwise) and GPS-shaped text, spliced in after SOI: a phone photo.
+fn phone_photo(w: u32, h: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x * 4) as u8, (y * 4) as u8, 90]));
+    let mut base = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut base, 90)
+        .encode_image(&img)
+        .unwrap();
+    let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+    tiff.extend_from_slice(&1u16.to_le_bytes());
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes());
+    tiff.extend_from_slice(&3u16.to_le_bytes());
+    tiff.extend_from_slice(&1u32.to_le_bytes());
+    tiff.extend_from_slice(&6u16.to_le_bytes());
+    tiff.extend_from_slice(&[0, 0]);
+    tiff.extend_from_slice(&0u32.to_le_bytes());
+    tiff.extend_from_slice(b"GPSLatitude 40.7128 N GPSLongitude 74.0060 W");
+    let mut app1 = b"Exif\0\0".to_vec();
+    app1.extend_from_slice(&tiff);
+    let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    out.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(&app1);
+    out.extend_from_slice(&base[2..]);
+    out
+}
+
+fn holds(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+impl Fx {
+    /// A rendition: status, content type, the two dimension headers, bytes.
+    async fn rendition(&self, id: &str, query: &str) -> (u16, String, u32, u32, Vec<u8>) {
+        let resp = self
+            .client
+            .get(format!("{}/v1/files/{id}/rendition?{query}", self.base))
+            .bearer_auth(&self.owner)
+            .send()
+            .await
+            .expect("rendition GET");
+        let s = resp.status().as_u16();
+        let h = |k: &str| {
+            resp.headers()
+                .get(k)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let (ct, w, ht) = (h("content-type"), h("x-ciris-width"), h("x-ciris-height"));
+        let body = resp.bytes().await.expect("body").to_vec();
+        (s, ct, w.parse().unwrap_or(0), ht.parse().unwrap_or(0), body)
+    }
+}
+
+/// CIRISServer#614 (Eric 2026-11-18: renditions are part of chat). A photo
+/// written into a shared room is canonicalised at the sender's node: upright,
+/// with no EXIF and no location. Every reader's node then serves its own
+/// display and thumbnail renditions and a thumbhash, so a client never
+/// decodes an original. A `self` file keeps the photo as taken.
+#[tokio::test]
+async fn a_shared_photo_loses_its_location_and_readers_get_renditions() {
+    let fx = fixture().await;
+    let room = fx.owners_community("photos", &[]).await;
+    let in_room = format!("cohort=community&room_id={room}");
+    let photo = phone_photo(64, 32);
+    assert!(holds(&photo, b"Exif") && holds(&photo, b"GPSLatitude"));
+
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "community", "room_id": room, "bytes_base64": b64(&photo),
+                "media_type": "image/jpeg", "filename": "IMG_0001.jpeg",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let id = v["attestation_id"].as_str().expect("id").to_owned();
+
+    // What crossed is the canonical photo: no Exif block, no location,
+    // turned upright (64 x 32 with orientation 6 is a 32 x 64 portrait).
+    let sent = fx.read_bytes(&id, &in_room).await;
+    assert!(!holds(&sent, b"Exif"), "the sent bytes carry no Exif block");
+    assert!(!holds(&sent, b"GPS"), "nor any of the location");
+    let upright = image::load_from_memory(&sent).expect("the canonical bytes decode");
+    assert_eq!((upright.width(), upright.height()), (32, 64));
+    let (_, meta) = fx.get(&format!("/v1/files/{id}/meta?{in_room}")).await;
+    assert_eq!(meta["media_type"], "image/jpeg", "{meta}");
+    assert_eq!(meta["filename"], "IMG_0001.jpeg", "{meta}");
+
+    // Renditions, made by this node from those bytes.
+    let (s, ct, w, h, thumb) = fx.rendition(&id, &format!("size=thumb&{in_room}")).await;
+    assert_eq!((s, ct.as_str()), (200, "image/jpeg"));
+    assert_eq!((w, h), (32, 64), "a small photo is never scaled up");
+    assert!(image::load_from_memory(&thumb).is_ok());
+    let (s, _, _, _, display) = fx.rendition(&id, &in_room).await;
+    assert_eq!(s, 200, "display is the default");
+    assert!(!holds(&display, b"Exif"));
+
+    let (s, info) = fx
+        .get(&format!("/v1/files/{id}/rendition?size=info&{in_room}"))
+        .await;
+    assert_eq!(s, 200, "{info}");
+    assert_eq!(
+        (info["width"].as_u64(), info["height"].as_u64()),
+        (Some(32), Some(64))
+    );
+    assert_eq!(info["placeholder_alg"], "thumbhash");
+    let ph = BASE64
+        .decode(info["placeholder"].as_str().expect("placeholder"))
+        .expect("base64");
+    assert!(!ph.is_empty() && ph.len() <= 64, "CC 3.3.13: <= 64 bytes");
+    let (_, read) = fx.get(&format!("/v1/files/{id}?{in_room}")).await;
+    assert_eq!(
+        info["derived_from"]["content_digest"], read["content_digest"],
+        "a rendition names the bytes it was made from"
+    );
+
+    // Refusals, by name.
+    let (s, v) = fx
+        .get(&format!("/v1/files/{id}/rendition?size=huge&{in_room}"))
+        .await;
+    assert_eq!((s, reason(&v)), (400, "drive.unknown_rendition"), "{v}");
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "community", "room_id": room,
+                "bytes_base64": b64(b"just words"), "media_type": "text/plain",
+            }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let text = v["attestation_id"].as_str().unwrap().to_owned();
+    let (s, v) = fx
+        .get(&format!("/v1/files/{text}/rendition?size=thumb&{in_room}"))
+        .await;
+    assert_eq!((s, reason(&v)), (415, "drive.no_rendition"), "{v}");
+    let mut broken = phone_photo(16, 16);
+    broken.truncate(broken.len() / 2);
+    let (s, v) = fx
+        .post(
+            "/v1/files",
+            serde_json::json!({
+                "cohort": "community", "room_id": room, "bytes_base64": b64(&broken),
+                "media_type": "image/jpeg",
+            }),
+        )
+        .await;
+    assert_eq!((s, reason(&v)), (422, "drive.image_undecodable"), "{v}");
+
+    // SELF keeps the photo as taken, and still renders.
+    let mine = fx
+        .upload_self(&photo, Some("IMG_0002.jpg"), "image/jpeg")
+        .await;
+    assert_eq!(
+        fx.read_bytes(&mine, "").await,
+        photo,
+        "self is the original"
+    );
+    let (s, _, w, h, _) = fx.rendition(&mine, "size=thumb").await;
+    assert_eq!(
+        (s, w, h),
+        (200, 32, 64),
+        "rendered upright from the original"
+    );
+
+    // MOVING a photo from self into the room strips it on the way in.
+    let (s, v) = fx
+        .post(
+            &format!("/v1/files/{mine}/move"),
+            serde_json::json!({ "cohort": "community", "room_id": room, "keep_source": true }),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let moved = v["attestation_id"].as_str().unwrap().to_owned();
+    let moved_bytes = fx.read_bytes(&moved, &in_room).await;
+    assert!(
+        !holds(&moved_bytes, b"GPS"),
+        "the room's copy carries no location"
+    );
 }

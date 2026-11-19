@@ -465,6 +465,31 @@ folded into "no session"), `drive.bad_body` (400, an unparseable JSON or multipa
    each `GET /v1/drive` row carries `custody: {devices_total, received_on}`. Point 7's
    `devices_holding` stays as it was. Sources, gaps and the later copy-to / remove-from design:
    `FSD/FILE_CUSTODY.md`.
+10. **Image renditions (0.5.250, CIRISServer#614; Eric 2026-11-18: part of chat).** A client never
+    decodes an original image; it shows only bytes its own node re-encoded in memory-safe Rust
+    (`src/media_render.rs`: `image` with its pure-Rust JPEG, PNG, WebP and GIF codecs only).
+    - **At the sender's node:** an image written or moved into a `family` or `community` room is
+      canonicalised before it is hashed and sealed (CC 3.3.13). It is turned upright from its EXIF
+      orientation and re-encoded, so no EXIF, GPS, XMP or ICC block leaves the device: JPEG at
+      quality 90, PNG when any pixel is transparent; an animated GIF keeps its frames, up to 500.
+      A WebP or opaque PNG becomes a JPEG and its filename takes the new extension. A `self` file
+      keeps the photo as taken.
+    - **At every reader's node:** `GET /v1/files/{id}/rendition?size=display|thumb|info` (same
+      `cohort` / `room_id` and the same access as `GET /v1/files/{id}`, moderation included).
+      `display` fits 2048 px on the long edge and `thumb` 320 px, never upscaled; both are JPEG,
+      or PNG when any pixel is transparent, with `X-Ciris-Width` / `X-Ciris-Height` and
+      `X-Ciris-Derived-From: sha-256=<hex>`. `info` is `{width, height, placeholder (thumbhash,
+      base64), derived_from}`. GIF and animated WebP render their first frame.
+    - **Caps** are the published `tier_a` table's, checked from the header before any pixel is
+      decoded: JPEG/PNG 16 MB and 33 MP, WebP 10 MB, GIF 25 MB and 921,600 px. At most two decodes
+      run at once. Renditions are cached in memory only (48 MB), never on disk, and a hit is
+      served only after the reader's access is checked again.
+    - **Refusals:** `drive.no_rendition` 415 (not one of the four types; HEIC/AVIF stay Tier B,
+      converted at the sender), `drive.image_too_large` 413, `drive.image_undecodable` 422 (on
+      upload too: a broken image is not written into a shared room), `drive.unknown_rendition`
+      400. The policy says `renditions: true` and publishes the route and edges.
+    - Witness: `tests/drive_crud.rs` `a_shared_photo_loses_its_location_and_readers_get_renditions`
+      and `media_render`'s unit tests.
 
 ## 6. Witnesses
 
