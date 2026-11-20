@@ -468,6 +468,45 @@ pub async fn emit_identity_amendment(
     authorized_by: &str,
     request_id: &str,
 ) -> Result<String, AgentRowError> {
+    emit_identity_amendment_after(
+        engine,
+        node_key_id,
+        amendment_digest,
+        authorized_by,
+        request_id,
+        None,
+    )
+    .await
+}
+
+/// The envelope member that names the amendment a link follows: `refs.prev`
+/// (rc21 §3, the identity profile chain; CC `family_payloads_v2.cddl` puts the
+/// same `refs.prev` on the edition-2 form).
+pub const REFS: &str = "refs";
+/// The member under [`REFS`].
+pub const PREV: &str = "prev";
+
+/// [`emit_identity_amendment`] at a position in the agent's identity profile
+/// chain (rc21 §3; CIRISAgent 2.23.1 `deferral_rows.emit_base_link`).
+///
+/// - `prev = None`: the BASE link. The signed envelope carries no `refs.prev`,
+///   and its `amendment_digest` is the base template's.
+/// - `prev = Some(id)`: the link follows the amendment `id`. The envelope
+///   carries `refs: {"prev": id}`, inside the signature. `id` must be an
+///   admitted `identity_amendment:v1` about this same agent.
+///
+/// The agent reads the chain back through `deferral_rows`, which returns the
+/// envelope whole. Persist v61's admission reads only `amendment_digest`,
+/// `authorized_by` and `evidence_refs`, so `refs` is stored verbatim. Nothing
+/// migrates to v62, which re-emits the chain as edition-2 rows.
+pub async fn emit_identity_amendment_after(
+    engine: &Engine,
+    node_key_id: &str,
+    amendment_digest: &str,
+    authorized_by: &str,
+    request_id: &str,
+    prev: Option<&str>,
+) -> Result<String, AgentRowError> {
     hex64("amendment_digest", amendment_digest)?;
     nonempty("authorized_by", authorized_by)?;
     nonempty("request_id", request_id)?;
@@ -562,11 +601,31 @@ pub async fn emit_identity_amendment(
         )));
     }
 
+    // The link it follows: an admitted amendment of THIS agent, or none (the
+    // base link).
+    if let Some(p) = prev {
+        nonempty("prev", p)?;
+        dir.get_attestation(p)
+            .await
+            .map_err(|e| AgentRowError::Store(format!("get_attestation({p}): {e:#}")))?
+            .filter(|r| {
+                dimension_of(r) == Some(IDENTITY_AMENDMENT) && r.attested_key_id == identity
+            })
+            .ok_or_else(|| {
+                unauthorized(format!(
+                    "prev {p} is not an admitted {IDENTITY_AMENDMENT} of this agent"
+                ))
+            })?;
+    }
+
     let mut body = serde_json::json!({
         (AMENDMENT_DIGEST): amendment_digest,
         "authorized_by": authorized_by,
         "evidence_refs": [authorized_by],
     });
+    if let Some(p) = prev {
+        body[REFS] = serde_json::json!({ (PREV): p });
+    }
     inherit_room(&mut body, &response.attestation_envelope);
     let id = match attest::emit(
         engine,

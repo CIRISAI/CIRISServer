@@ -14,9 +14,9 @@ use ciris_persist::prelude::{Engine, HybridPolicy, LocalSigner};
 use ed25519_dalek::SigningKey;
 
 use ciris_server::agent_deferral::{
-    emit_deferral_request, emit_deferral_response, emit_identity_amendment, sign_deferral_response,
-    AgentRowError, DeferralRequest, DEFERRAL_APPROVED, DEFERRAL_REJECTED, DEFERRAL_REQUEST,
-    IDENTITY_AMENDMENT, ROOM_FIELD,
+    emit_deferral_request, emit_deferral_response, emit_identity_amendment,
+    emit_identity_amendment_after, sign_deferral_response, AgentRowError, DeferralRequest,
+    DEFERRAL_APPROVED, DEFERRAL_REJECTED, DEFERRAL_REQUEST, IDENTITY_AMENDMENT, ROOM_FIELD,
 };
 use ciris_server::attest::{self, register_key, KeySigner, Spec};
 use ciris_server::auth::ownership::{
@@ -633,4 +633,74 @@ async fn an_amendment_is_the_exact_text_the_wa_approved() {
         .await
         .expect_err("a rejection with a digest");
     assert_eq!(err.reason_id(), "deferral.bad_input");
+}
+
+/// rc21 §3, CIRISAgent 2.23.1: the identity profile chain. The base link
+/// carries no `refs.prev`; each later amendment names the link it follows in
+/// the signed envelope as `refs: {"prev": id}`, read back whole through
+/// `deferral_rows`. A `prev` that is not an amendment of this agent is refused.
+#[tokio::test]
+async fn an_amendment_names_the_link_it_follows_and_the_base_names_none() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+
+    // The base link: approved like any amendment, written with prev = None.
+    let req0 = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let resp0 = sign_deferral_response(&engine, &owner, &req0, true, Some(DIGEST))
+        .await
+        .unwrap();
+    let base = emit_identity_amendment_after(&engine, &agent, DIGEST, &resp0, &req0, None)
+        .await
+        .expect("the base link");
+    let base_row = row(&engine, &base).await;
+    assert!(
+        base_row.attestation_envelope.get("refs").is_none(),
+        "the base link names no prev"
+    );
+
+    // A correction on top of it: approved separately, naming the base.
+    const NEXT: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    let mut r1 = request(None);
+    r1.deferral_id = "def-2".into();
+    let req1 = emit_deferral_request(&engine, &agent, &r1).await.unwrap();
+    let resp1 = sign_deferral_response(&engine, &owner, &req1, true, Some(NEXT))
+        .await
+        .unwrap();
+    let next = emit_identity_amendment_after(&engine, &agent, NEXT, &resp1, &req1, Some(&base))
+        .await
+        .expect("an amendment following the base");
+
+    let rows = ciris_server::agent_deferral::deferral_rows(&engine, &[base.clone(), next.clone()])
+        .await
+        .unwrap();
+    let read_next = rows[1].as_ref().expect("held");
+    assert_eq!(
+        read_next.attestation_envelope["refs"]["prev"],
+        base.as_str(),
+        "refs.prev comes back whole through deferral_rows"
+    );
+    assert!(rows[0]
+        .as_ref()
+        .expect("held")
+        .attestation_envelope
+        .get("refs")
+        .is_none());
+
+    // A prev that is not an amendment of this agent (here a deferral request).
+    const THIRD: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let mut r2 = request(None);
+    r2.deferral_id = "def-3".into();
+    let req2 = emit_deferral_request(&engine, &agent, &r2).await.unwrap();
+    let resp2 = sign_deferral_response(&engine, &owner, &req2, true, Some(THIRD))
+        .await
+        .unwrap();
+    let err = emit_identity_amendment_after(&engine, &agent, THIRD, &resp2, &req2, Some(&req2))
+        .await
+        .expect_err("prev must be an amendment of this agent");
+    assert!(
+        matches!(err, AgentRowError::Unauthorized(_)),
+        "refused as unauthorized: {err:?}"
+    );
 }
