@@ -59,6 +59,9 @@ on:
       - "src/drive.rs"
       - "src/self_room_drive.rs"
       - "harness/mesh-repro/**"
+      - "harness/native/**"
+      - "src/call*.rs"
+      - "src/qa_call.rs"
       - ".github/workflows/mesh-harness.yml"
 
 # A newer commit supersedes an in-flight run: a 25-minute job should never queue
@@ -393,3 +396,63 @@ jobs:
           docker compose -p "ciris-${{ matrix.scenario }}" \
             ${{ steps.topo.outputs.files }} \
             down -v --remove-orphans || true
+
+  # Calls and chat on the AGENT's own boot (the fold), on every PR this
+  # workflow runs for and nightly. The agent opens persist with its actor key,
+  # starts the embedded edge under use_node_identity, and runs compose on that
+  # edge (harness/native/fold_node.py). Edge's own signer is the actor there,
+  # and calls failed on every agent install (`call.plumbing`, 2026-11-18) while
+  # every binary run passed, because the binary signs with the node key. Each
+  # run first proves both nodes split and that edge holds the node key, then
+  # drives the production routes: a pair room and a body, a member call with
+  # Opus frames both ways, and the same call with video.
+  split-home-fold:
+    name: split-home fold (chat, call, video, screen share)
+    needs: build
+    if: github.event_name != 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list \
+                     /etc/apt/sources.list.d/azure-cli.list \
+                     /etc/apt/sources.list.d/azure-cli.sources
+          sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo find /etc/apt/sources.list.d -type f -exec \
+            sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' {} + 2>/dev/null || true
+          sudo timeout 300 apt-get update \
+            -o Acquire::Retries=3 \
+            -o Acquire::http::Timeout=20 \
+            -o Acquire::https::Timeout=20
+          sudo apt-get install -y libtss2-dev libsqlite3-dev libudev-dev
+      - name: Fetch the test-anchor build
+        uses: actions/download-artifact@v4
+        with:
+          name: mesh-harness-build
+          path: .
+      - name: Install the test-anchor wheel
+        run: |
+          chmod +x target/release/ciris-server target/release/examples/test_ceremony_anchor
+          python3 -m pip install --quiet pyyaml websocket-client harness/mesh-repro/wheels/*.whl
+      - name: split-home fold — chat
+        run: SPLIT_HOME=fold python3 -m harness.native chat --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-chat"
+      - name: split-home fold — voice call
+        if: always()
+        run: SPLIT_HOME=fold AV_SECONDS=5 python3 -m harness.native av_member --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-call"
+      - name: split-home fold — video call
+        if: always()
+        run: SPLIT_HOME=fold AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-video"
+      - name: split-home fold — screen share
+        if: always()
+        run: SPLIT_HOME=fold AV_SECONDS=3 python3 -m harness.native av_share --binary target/release/ciris-server --work "$RUNNER_TEMP/fold-share"
+      - name: Upload node logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: split-home-fold-logs
+          path: ${{ runner.temp }}/fold-*/**/node.log
+          if-no-files-found: ignore
+          retention-days: 14

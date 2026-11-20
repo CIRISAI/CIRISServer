@@ -37,7 +37,7 @@ use serde_json::json;
 
 use ciris_edge::transport::av_call::{Call, CallError, CallEvent, CallOptions, Frame};
 use ciris_edge::transport::av_chunk_auth::SignedEnd;
-use ciris_edge::transport::realtime_av::{ChunkLayer, ReceiverLayerPolicy};
+use ciris_edge::transport::realtime_av::{ChunkLayer, ReceiverLayerPolicy, StreamId};
 use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
 
@@ -71,6 +71,9 @@ struct Joined {
     /// Whether video and screen share may be published now: the call has at
     /// most [`VIDEO_MAX_PEOPLE`] people (see [`video_allowed`]).
     video_ok: std::sync::atomic::AtomicBool,
+    /// This device's live screen or window share, a second own stream
+    /// (`Call::add_stream`), while one is up.
+    share: StdMutex<Option<StreamId>>,
 }
 
 /// **Video only between two people, on edge v45.0.0** (Eric, 2026-11-10: "Yes
@@ -381,6 +384,7 @@ async fn join(
                 caps: StdMutex::new(HashMap::new()),
                 video: body.video,
                 video_ok: std::sync::atomic::AtomicBool::new(video_ok),
+                share: StdMutex::new(None),
             }),
         );
     tracing::info!(room = %room, relay = body.relay, video = body.video, "call: joined as the member");
@@ -878,10 +882,32 @@ async fn pump(
     let out_e = out_tx.clone();
     let eng_e = Arc::clone(&engine);
     let event_task = tokio::spawn(async move {
+        // The shares this socket has announced, so their end is a
+        // `share_stopped` too (CSD-134).
+        let mut shares: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         while let Some(e) = events.recv().await {
-            let text = with_person(&eng_e, event_json(&e)).await.to_string();
-            if out_e.send(Message::Text(text.into())).await.is_err() {
-                break;
+            let mut out = vec![event_json(&e)];
+            match &e {
+                CallEvent::StreamAdded {
+                    publisher, stream, ..
+                } if share_kind(&e) => {
+                    shares.insert(stream.0);
+                    out.push(json!({ "type": "share_started", "member": publisher,
+                                     "stream_id": hex::encode(stream.0) }));
+                }
+                CallEvent::StreamEnded {
+                    publisher, stream, ..
+                } if shares.remove(&stream.0) => {
+                    out.push(json!({ "type": "share_stopped", "member": publisher,
+                                     "stream_id": hex::encode(stream.0) }));
+                }
+                _ => {}
+            }
+            for v in out {
+                let text = with_person(&eng_e, v).await.to_string();
+                if out_e.send(Message::Text(text.into())).await.is_err() {
+                    return;
+                }
             }
         }
     });
@@ -1047,27 +1073,290 @@ async fn pump(
     let _ = leave_room(&room, why).await;
 }
 
-/// `POST`/`DELETE /v1/chat/{room}/call/share`: a member's screen or window share,
-/// a second stream that replaces nothing (CC; edge 45.1 `Call::add_stream`). Until
-/// that pin it is refused by name, so the client tells "not on this node yet" from
-/// a missing route. The contract is agreed (CSD-134): POST answers
-/// `{stream_id, frames_ticket, frame_budget_bytes}`; the share's outgoing frames go
-/// on `WS …/call/share/frames`, which also sends `ready`; receivers get
-/// `share_started` / `share_stopped` (with `person`) on their main socket.
+/// True for a `stream_added` whose signed kind is a share (CC rc18: 1).
+fn share_kind(e: &CallEvent) -> bool {
+    matches!(e, CallEvent::StreamAdded { kind, .. } if *kind == ciris_edge::transport::av_chunk_auth::STREAM_KIND_SHARE)
+}
+
+/// The ticket room of a share's frames socket: apart from the call's own, so
+/// one ticket never opens the other socket.
+fn share_ticket_room(room: &str) -> String {
+    format!("{room}#share")
+}
+
+/// `POST /v1/chat/{room}/call/share`: share this device's screen, a window or
+/// an app, as a SECOND stream that replaces nothing (CSD-134; CC rc17: a share
+/// is a second stream with no `replaces`; edge v45 `Call::add_stream`). The
+/// camera and microphone keep their own stream.
+///
+/// Answers `{stream_id, frames_ticket, frame_budget_bytes, kind: "share"}`.
+/// The share's frames go on `WS …/call/share/frames` (binary, the same
+/// frame format as the call's socket), which sends `ready` first. Every other
+/// member's main socket sees `stream_added {kind: "share"}` and
+/// `share_started {member, person, stream_id}`; a stop is `stream_ended` and
+/// `share_stopped`. A share is video, so it keeps the call's two-person rule
+/// (`call.video_two_people_only`). One share per device at a time
+/// (`call.share_already_live`, 409, naming the live one).
 async fn share(
     State(st): State<CallState>,
     headers: HeaderMap,
-    Path(_room): Path<String>,
+    Path(room): Path<String>,
 ) -> Response {
     if let Err(r) = require_owner(&st, &headers).await {
         return r;
     }
-    refuse_with(
-        StatusCode::NOT_IMPLEMENTED,
-        "call.share_unavailable",
-        "Sharing your screen isn't available on this node yet.",
-        json!({ "needs": "edge 45.1 (Call::add_stream)" }),
+    let Some(j) = current(&room) else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.not_joined",
+            "Join the call first.",
+            json!({}),
+        );
+    };
+    if !j.video_ok.load(std::sync::atomic::Ordering::Relaxed) {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.video_two_people_only",
+            "Video and screen sharing work in calls between two people for now. This call has more, \
+             so it's voice only. If your camera is on, it starts sending again when the call is back \
+             to two.",
+            json!({ "max_people": VIDEO_MAX_PEOPLE }),
+        );
+    }
+    if let Some(live) = *j
+        .share
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.share_already_live",
+            "You're already sharing your screen.",
+            json!({ "stream_id": hex::encode(live.0) }),
+        );
+    }
+    let (stream, budget) = {
+        let g = j.call.lock().await;
+        let Some(call) = g.as_ref() else {
+            return refuse_with(
+                StatusCode::CONFLICT,
+                "call.not_joined",
+                "Join the call first.",
+                json!({}),
+            );
+        };
+        match call.add_stream(None).await {
+            Ok(s) => (s, call.chunk_plaintext_budget()),
+            Err(e) => {
+                tracing::warn!(room = %room, error = %e, "call: the share stream was refused");
+                return refuse_with(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "call.share_unavailable",
+                    "Sharing your screen isn't available on this node yet.",
+                    json!({ "detail": e.to_string() }),
+                );
+            }
+        }
+    };
+    *j.share
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(stream);
+    tracing::info!(room = %room, stream = %hex::encode(stream.0), "call: share started");
+    (
+        StatusCode::OK,
+        Json(json!({
+            "room": room,
+            "kind": "share",
+            "stream_id": hex::encode(stream.0),
+            "frames_ticket": issue_ticket(&share_ticket_room(&room)),
+            "frame_budget_bytes": budget,
+        })),
     )
+        .into_response()
+}
+
+/// End this device's share: `end_stream`, signed, so every member sees
+/// `stream_ended` and `share_stopped`. `None` when there was none.
+async fn stop_share(j: &Joined) -> Option<StreamId> {
+    let live = j
+        .share
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()?;
+    let g = j.call.lock().await;
+    if let Some(call) = g.as_ref() {
+        if let Err(e) = call.end_stream(live).await {
+            tracing::warn!(error = %e, "call: ending the share stream failed");
+        }
+    }
+    Some(live)
+}
+
+/// `DELETE /v1/chat/{room}/call/share`: stop sharing. The call goes on.
+async fn unshare(
+    State(st): State<CallState>,
+    headers: HeaderMap,
+    Path(room): Path<String>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let Some(j) = current(&room) else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.not_joined",
+            "Join the call first.",
+            json!({}),
+        );
+    };
+    match stop_share(&j).await {
+        Some(s) => (
+            StatusCode::OK,
+            Json(json!({ "room": room, "stopped": hex::encode(s.0) })),
+        )
+            .into_response(),
+        None => refuse_with(
+            StatusCode::CONFLICT,
+            "call.no_share",
+            "You aren't sharing your screen.",
+            json!({}),
+        ),
+    }
+}
+
+/// `WS /v1/chat/{room}/call/share/frames?ticket=…`: the share's outgoing
+/// frames, binary, in the call socket's frame format. Sends `ready
+/// {frame_budget_bytes}` first and `publish_refused` on a frame it could not
+/// send. Closing the socket stops the share.
+async fn share_socket(
+    State(st): State<CallState>,
+    headers: HeaderMap,
+    Path(room): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SocketQuery>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    if !origin_ok(&headers) {
+        return refuse_with(
+            StatusCode::FORBIDDEN,
+            "call.cross_origin",
+            "This call can only be opened from this device's own page.",
+            json!({}),
+        );
+    }
+    let ticketed = q
+        .ticket
+        .as_deref()
+        .is_some_and(|t| spend_ticket(t, &share_ticket_room(&room)));
+    if !ticketed {
+        if let Err(r) = require_owner(&st, &headers).await {
+            return r;
+        }
+    }
+    let Some(j) = current(&room) else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.not_joined",
+            "Join the call first.",
+            json!({}),
+        );
+    };
+    let Some(stream) = *j
+        .share
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.no_share",
+            "You aren't sharing your screen.",
+            json!({}),
+        );
+    };
+    ws.on_upgrade(move |socket| share_pump(socket, room, j, stream))
+}
+
+async fn share_pump(socket: WebSocket, room: String, j: Arc<Joined>, stream: StreamId) {
+    use futures_util::{SinkExt, StreamExt};
+    let (mut tx, mut rx) = socket.split();
+    let budget = {
+        let g = j.call.lock().await;
+        g.as_ref().and_then(|c| c.chunk_plaintext_budget())
+    };
+    let ready = json!({ "type": "ready", "kind": "share", "stream_id": hex::encode(stream.0),
+                        "frame_budget_bytes": budget, "fragmenting": false });
+    if tx
+        .send(Message::Text(ready.to_string().into()))
+        .await
+        .is_err()
+    {
+        let _ = stop_share(&j).await;
+        return;
+    }
+    while let Some(msg) = rx.next().await {
+        let bytes = match msg {
+            Ok(Message::Binary(b)) => b,
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => continue,
+        };
+        // The share was stopped by DELETE, or replaced: this socket is done.
+        if *j
+            .share
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            != Some(stream)
+        {
+            break;
+        }
+        let refusal = match call_frames::decode_outgoing(&bytes) {
+            Err(e) => Some(json!({ "type": "publish_refused", "reason": e.token() })),
+            Ok(_) if !j.video_ok.load(std::sync::atomic::Ordering::Relaxed) => Some(
+                json!({ "type": "publish_refused", "reason": "video_two_people_only",
+                         "reason_id": "call.video_two_people_only",
+                         "max_people": VIDEO_MAX_PEOPLE }),
+            ),
+            Ok(f) => {
+                let mut guard = j.call.lock().await;
+                match guard.as_mut() {
+                    None => break,
+                    Some(call) => {
+                        let budget = call.chunk_plaintext_budget();
+                        let frame = Frame {
+                            codec_id: f.codec_id,
+                            layer: ChunkLayer {
+                                spatial: f.layer.0,
+                                temporal: f.layer.1,
+                                quality: f.layer.2,
+                            },
+                            bytes: f.payload,
+                        };
+                        match call.publish_on(stream, frame).await {
+                            Ok(_) => None,
+                            Err(CallError::FrameTooLarge { .. }) => Some(json!({
+                                "type": "publish_refused", "reason": "over_budget", "budget": budget })),
+                            Err(e) => Some(json!({
+                                "type": "publish_refused", "reason": "call_error", "detail": e.to_string() })),
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(r) = refusal {
+            if tx.send(Message::Text(r.to_string().into())).await.is_err() {
+                break;
+            }
+        }
+    }
+    // The socket closed: the share ends, the call goes on (if this socket
+    // still owned the live share).
+    let still_ours = *j
+        .share
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        == Some(stream);
+    if still_ours {
+        let _ = stop_share(&j).await;
+        tracing::info!(room = %room, "call: share stopped (its socket closed)");
+    }
 }
 
 /// The member call routes. Mounted on every node; each route is the owner's.
@@ -1087,7 +1376,11 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
         .route("/v1/chat/{room}/call/layers", axum::routing::post(layers))
         .route(
             "/v1/chat/{room}/call/share",
-            axum::routing::post(share).delete(share),
+            axum::routing::post(share).delete(unshare),
+        )
+        .route(
+            "/v1/chat/{room}/call/share/frames",
+            axum::routing::get(share_socket),
         )
         .with_state(CallState { engine, edge })
 }

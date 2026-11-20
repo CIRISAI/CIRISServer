@@ -338,7 +338,29 @@ pub fn policy() -> serde_json::Value {
         // `drive.too_large` above it). Published so a client sizes its picker
         // from the node, not from a number it hardcoded (0.5.245).
         "streamed_max_bytes": crate::drive::STREAMED_FILE_CEILING,
-        "renditions": false,
+        // 0.5.250 (#614): image renditions. An image written into a shared
+        // room is canonicalised at the sender's node (upright, no EXIF / GPS /
+        // XMP / ICC); every reader's node serves its own renditions, so a
+        // client never decodes an original.
+        "renditions": true,
+        "rendition": {
+            "route": "GET /v1/files/{id}/rendition?size=display|thumb|info",
+            "types": ["image/jpeg", "image/png", "image/webp", "image/gif"],
+            "display_max_edge": crate::media_render::DISPLAY_MAX_EDGE,
+            "thumb_max_edge": crate::media_render::THUMB_MAX_EDGE,
+            "formats": "image/jpeg; image/png when any pixel is transparent; image/gif when animated",
+            "placeholder": "thumbhash, base64, of the first frame, on size=info",
+            // Animated GIF, WebP and APNG stay animated (Eric 2026-11-18): the
+            // reader picks how one plays; a still image ignores it.
+            "animated": ["image/gif", "image/webp", "image/png"],
+            "play": ["loop", "once", "still"],
+            "play_default": "loop",
+            "animated_max_frames": crate::media_render::MAX_ANIMATED_FRAMES,
+            "animated_max_pixels": crate::media_render::ANIMATED_MAX_PIXELS,
+            "rendition_sha256_header": "X-Ciris-Rendition-Sha256",
+            "made": "synchronously on the first GET; no pending state",
+            "canonicalised_at_sender": "family and community rooms; self keeps the original",
+        },
     })
 }
 

@@ -244,6 +244,21 @@ ignore = [
                           # calls extract; fixed in zip 8 — persist's to lift (candle).
     "RUSTSEC-2025-0119",  # number_prefix unmaintained; persist → hf-hub → indicatif.
     "RUSTSEC-2024-0375",  # atty unmaintained; build-time only (cbindgen 0.26 → clap 3).
+    # ── SERVER (0.5.250): advisories published 2026-11-18 ──
+    # hickory-proto DNSSEC validation, the three edge 45.1.6 ignores on the same
+    # reasoning: no CIRIS path turns on DNSSEC validation; via persist/verify.
+    "RUSTSEC-2026-0549",  # NSEC3 NODATA at a zone apex accepted without a matching NSEC3
+    "RUSTSEC-2026-0550",  # unsigned NSEC/NSEC3 record used in a nonexistence proof
+    "RUSTSEC-2026-0551",  # records of another DNS class marked secure without validation
+    "RUSTSEC-2026-0543",  # chrono unmaintained (edge 45.1.6 ignores it too); no replacement yet
+    # zip 7.x, via persist → candle-core 0.10 (zip = "7.2.0"), which opens only
+    # the model files the node ships. Nothing here extracts an archive, opens an
+    # AES-encrypted entry, uses the legacy Shrink/Reduce/Implode methods or reads
+    # a zip as a stream. Fixed in zip 9: persist's to lift with candle.
+    "RUSTSEC-2026-0545",  # AES entries returned without their authentication check
+    "RUSTSEC-2026-0546",  # ZipArchive::extract writes outside the destination via symlinks
+    "RUSTSEC-2026-0547",  # legacy decoders preallocate the declared uncompressed size
+    "RUSTSEC-2026-0548",  # ZipStreamReader names entries by local header
     "RUSTSEC-2024-0449",  # unsafe-libyaml unmaintained; via serde_yaml 0.9 (deprecated)
                           # in our own ciris-lens-core. Replace serde_yaml: 0.5.246.
 ]

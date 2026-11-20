@@ -44,6 +44,11 @@ pub const DEFERRAL_REJECTED: &str = "deferral:response:rejected:v1";
 /// `identity_amendment:v1`.
 pub const IDENTITY_AMENDMENT: &str = "identity_amendment:v1";
 
+/// The member, in both the approving answer and the amendment, carrying the
+/// SHA-256 of the amendment text (persist `AMENDMENT_DIGEST_MEMBER`).
+pub const AMENDMENT_DIGEST: &str =
+    ciris_persist::federation::identity_amendment::AMENDMENT_DIGEST_MEMBER;
+
 /// The row's namespace (`deferral:request:v1`, …) — the envelope's signed
 /// `dimension` member. The verb is always `scores` (the closed verb set); the
 /// dimension is what these rows ARE.
@@ -129,6 +134,10 @@ pub enum AgentRowError {
     /// CC 3.1.5's admission rule: the cited response does not authorise this
     /// amendment. The text says which condition failed.
     Unauthorized(String),
+    /// The amendment is not the text the Wise Authority approved: the cited
+    /// response carries no `amendment_digest`, or a different one (Eric
+    /// 2026-11-18, CIRISAgent#1366: the amendment is the EXACT approved text).
+    AmendmentDigestMismatch(String),
     /// The directory read or the write failed.
     Store(String),
 }
@@ -146,6 +155,7 @@ impl AgentRowError {
             Self::NoIdentity => "deferral.no_identity",
             Self::ResponseAlreadyUsed(_) => "deferral.response_already_used",
             Self::Unauthorized(_) => "identity_amendment_unauthorized",
+            Self::AmendmentDigestMismatch(_) => "amendment_digest_mismatch",
             Self::Store(_) => "deferral.store",
         }
     }
@@ -169,7 +179,7 @@ impl std::fmt::Display for AgentRowError {
                 f.write_str("the owner has no federation ID yet — mint one before answering")
             }
             Self::ResponseAlreadyUsed(m) => write!(f, "{m}"),
-            Self::Unauthorized(m) => write!(f, "{m}"),
+            Self::Unauthorized(m) | Self::AmendmentDigestMismatch(m) => write!(f, "{m}"),
             Self::Store(m) => write!(f, "store: {m}"),
         }
     }
@@ -340,6 +350,7 @@ pub async fn emit_deferral_response(
     seed_dir: std::path::PathBuf,
     request_id: &str,
     approved: bool,
+    amendment_digest: Option<&str>,
 ) -> Result<String, AgentRowError> {
     use crate::owner_signer_capsule::{acquire, CapsuleRefusal};
     nonempty("request_id", request_id)?;
@@ -356,7 +367,14 @@ pub async fn emit_deferral_response(
             CapsuleRefusal::NoFedIdentity => AgentRowError::NoIdentity,
             CapsuleRefusal::Unavailable(e) => AgentRowError::Store(e),
         })?;
-    sign_deferral_response(engine, capsule.local_signer(), request_id, approved).await
+    sign_deferral_response(
+        engine,
+        capsule.local_signer(),
+        request_id,
+        approved,
+        amendment_digest,
+    )
+    .await
 }
 
 async fn admitted_request(
@@ -380,12 +398,26 @@ async fn admitted_request(
 /// after the session check. Public so a test can sign as the owner without a
 /// session; production reaches it only through the capsule, so holding the pen
 /// is already the authorization.
+///
+/// `amendment_digest`: the SHA-256 of the exact amendment text the Wise
+/// Authority approved, signed into the answer with their own pen. An identity
+/// amendment is admitted only with this digest ([`emit_identity_amendment`]).
+/// A rejection approves no text, so it carries none.
 pub async fn sign_deferral_response(
     engine: &Engine,
     wa_pen: &ciris_persist::prelude::LocalSigner,
     request_id: &str,
     approved: bool,
+    amendment_digest: Option<&str>,
 ) -> Result<String, AgentRowError> {
+    if let Some(d) = amendment_digest {
+        hex64("amendment_digest", d)?;
+        if !approved {
+            return Err(AgentRowError::BadInput(
+                "a rejection approves no text, so it carries no amendment_digest".to_owned(),
+            ));
+        }
+    }
     let request = admitted_request(engine, request_id).await?;
     let dimension = if approved {
         DEFERRAL_APPROVED
@@ -397,6 +429,9 @@ pub async fn sign_deferral_response(
     });
     if let Some(d) = request.attestation_envelope.get("deferral_id") {
         body["deferral_id"] = d.clone();
+    }
+    if let Some(d) = amendment_digest {
+        body[AMENDMENT_DIGEST] = serde_json::Value::String(d.to_owned());
     }
     inherit_room(&mut body, &request.attestation_envelope);
     let id = attest::emit(
@@ -470,6 +505,26 @@ pub async fn emit_identity_amendment(
             "{authorized_by} answers {answers:?}, not the deferral {request_id}"
         )));
     }
+    // The EXACT text the Wise Authority approved: the digest they signed into
+    // the answer. No legacy grace: an approval without one saw no text.
+    match response
+        .attestation_envelope
+        .get(AMENDMENT_DIGEST)
+        .and_then(|v| v.as_str())
+    {
+        Some(approved) if approved == amendment_digest => {}
+        Some(approved) => {
+            return Err(AgentRowError::AmendmentDigestMismatch(format!(
+                "{authorized_by} approved the text with digest {approved}, not {amendment_digest}"
+            )))
+        }
+        None => {
+            return Err(AgentRowError::AmendmentDigestMismatch(format!(
+                "{authorized_by} approved no amendment text (no amendment_digest in the answer): \
+                 the Wise Authority approves the exact text"
+            )))
+        }
+    }
     dir.get_attestation(request_id)
         .await
         .map_err(|e| AgentRowError::Store(format!("get_attestation({request_id}): {e:#}")))?
@@ -508,7 +563,7 @@ pub async fn emit_identity_amendment(
     }
 
     let mut body = serde_json::json!({
-        "amendment_digest": amendment_digest,
+        (AMENDMENT_DIGEST): amendment_digest,
         "authorized_by": authorized_by,
         "evidence_refs": [authorized_by],
     });

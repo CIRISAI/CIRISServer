@@ -39,6 +39,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -156,6 +157,11 @@ class Node:
     ip: str = ""
     container: str = ""
     network: str = ""
+    # SPLIT_HOME=fold: this node boots the way the agent does (`fold_node.py`:
+    # the actor's engine, the embedded edge under use_node_identity, then
+    # compose on it). Configuration, claims and the CLI still use `binary`.
+    fold: bool = False
+    dial: List[str] = field(default_factory=list)
 
     # -- process --
 
@@ -190,6 +196,17 @@ class Node:
         # Docker: listen on every interface in the node's own namespace, so the
         # in-container API forwarder reaches it on loopback; peers dial ip:port.
         listen = f"0.0.0.0:{self.port}" if self.container else self.transport
+        self.dial = list(dial)
+        if self.fold:
+            # The agent's key exists before any server code runs: mint its two
+            # seeds first, so the CLI below adopts THIS key (sealing it and
+            # keeping `ed25519.seed.migrated`) rather than minting another.
+            ident = self.home / "identity"
+            ident.mkdir(parents=True, exist_ok=True)
+            for seed in ("ed25519.seed", "ml_dsa_65.seed"):
+                if not (ident / seed).exists():
+                    (ident / seed).write_bytes(os.urandom(32))
+                    (ident / seed).chmod(0o600)
         self._cli("config", "set", "net.listen_addr", json.dumps(listen))
         if dial:
             self._cli("config", "set", "net.bootstrap_peers", json.dumps(dial),
@@ -255,8 +272,12 @@ class Node:
             wait_for(f"{self.name} /health", healthy_c, health_timeout, every=1.0)
             return
         log = open(self.log_path, "ab")
+        cmd = [str(self.binary), "--home", str(self.home), "--key-id", self.key_id]
+        if self.fold:
+            cmd = [sys.executable, "-m", "harness.native.fold_node", "--home", str(self.home),
+                   "--key-id", self.key_id, "--listen", self.transport, "--peers", ",".join(self.dial)]
         self.proc = subprocess.Popen(
-            [str(self.binary), "--home", str(self.home), "--key-id", self.key_id],
+            cmd, cwd=str(Path(__file__).resolve().parents[2]),
             stdout=log, stderr=subprocess.STDOUT, env={**os.environ, **self.env},
             start_new_session=True)
         (self.log_path.parent / "pid").write_text(str(self.proc.pid))
@@ -628,6 +649,8 @@ class Mesh:
         self._ip_next = 9
         self.nodes: Dict[str, Node] = {}
         self.canonical: Optional[Node] = None
+        # True: people's nodes added from now on boot through the fold.
+        self.fold = False
         # A port base per WORK DIR, so two meshes run side by side without
         # racing for the same pair (measured: `Address already in use`).
         import zlib
@@ -688,6 +711,7 @@ class Mesh:
         # (laptop / phone) receives its owner's self and family content; the
         # real apps declare it the same way (desktop launcher, client, agent).
         n = self._node(name, env)
+        n.fold = self.fold
         n.configure(dial=upstream + [d.transport for d in (dial or [])])
         self.nodes[name] = n
         if start:

@@ -149,6 +149,10 @@ if [ "$FAST" = "0" ]; then
         "cargo test --features test-anchor --test trace_round_e2e --test trust_root_qa --test accord_duty_grant --test first_run_to_moderation_e2e --test final_genesis_dry_run --test contact_key_pull_e2e --test anchor_block_verifies --test seed_digest_probe" )
   L3+=( "remote-admin-mesh" \
         "cargo build --features test-anchor --bin ciris-server --example test_ceremony_anchor && python3 -m harness.native remote_admin --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-remote-admin\"" )
+  # Calls and chat on a SPLIT home (an actor key, a minted node key), as every
+  # agent install runs. Uses the binary remote-admin-mesh builds (same lane).
+  L3+=( "split-home-mesh" \
+        "python3 -m pip install --quiet pyyaml websocket-client && SPLIT_HOME=1 python3 -m harness.native chat --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-chat\" && SPLIT_HOME=1 AV_SECONDS=5 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-call\" && SPLIT_HOME=1 AV_VIDEO=1 AV_SECONDS=3 python3 -m harness.native av_member --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-video\" && SPLIT_HOME=1 AV_SECONDS=3 python3 -m harness.native av_share --binary target/debug/ciris-server --work \"\${TMPDIR:-/tmp}/ciris-split-share\"" )
 fi
 
 # Lane 4 builds nothing, so it needs no target dir and always runs alongside.

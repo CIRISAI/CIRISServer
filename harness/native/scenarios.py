@@ -67,6 +67,71 @@ class Steps:
 # ── chat between two PEOPLE, production routes (CIRISServer#698) ────────────
 
 
+
+# ── split homes: the topology every agent install has ───────────────────────
+
+
+def _split_home(mesh: Mesh) -> bool:
+    """`SPLIT_HOME=1` or `SPLIT_HOME=fold`: every PERSON's node boots split.
+
+    `1`: the binary, with its
+    configured key registers as an AGENT (`CIRIS_TEST_CONFIGURED_KEY_TYPE`,
+    test-anchor builds only), so the node splits through the production
+    branch: a minted node key on the wire, the actor key kept. The canonical
+    stays an ordinary node, so it is started first, before the switch is set.
+    The binary's `build_edge` signs with the node key, so this mode covers
+    split-home chat and routes, but not the edge signer.
+
+    `fold`: the agent's boot (`fold_node.py`, the library from
+    `HARNESS_FOLD_SO` or the installed wheel). This is the mode that covers
+    calls: they failed on every agent install until edge 45.1.6 (`call.plumbing`,
+    Eric's laptop, 2026-11-18) while every binary run passed."""
+    mode = os.environ.get("SPLIT_HOME", "")
+    if mode not in ("1", "fold"):
+        return False
+    if mesh.canonical is None:
+        mesh.start_canonical()
+    if mode == "fold":
+        # The agent's own boot (`fold_node.py`): the actor's engine and the
+        # embedded edge under use_node_identity, then compose on that edge.
+        # Edge's own signer is the ACTOR there, which is what broke calls.
+        mesh.fold = True
+    # Either way the configured key is the AGENT's: the harness's CLI
+    # configures the node before it boots, and must not register that key as
+    # a node first (on a real agent the agent registers it, as `agent`).
+    mesh.base_env["CIRIS_TEST_CONFIGURED_KEY_TYPE"] = "agent"
+    return True
+
+
+def _split_held(step: "Steps", nodes: List[Node]) -> bool:
+    """Each node really split, and edge acts as the node with the NODE key
+    (`Edge::set_node_signer`). Recorded as one step per node; a miss fails the
+    run by name, so a run that silently booted unsplit can never pass as a
+    split-home result."""
+    ok = True
+    for n in nodes:
+        # Compose logs both before the serve settles; give it a moment.
+        try:
+            wait_for(f"{n.name} to finish its split", lambda n=n: bool(
+                n.grep(r"edge acts as the node with the node key|edge refused this node.s signer")),
+                60, every=1)
+        except MeshError:
+            pass
+        # The binary logs the split as it mints the node key; on the fold the
+        # agent minted it first and compose reports the split home instead.
+        split = n.grep(r"the configured key is an ACTOR|this is a split home")
+        acts = n.grep(r"edge acts as the node with the node key")
+        refused = n.grep(r"edge refused this node.s signer")
+        step(f"split_home:{n.name}", split=bool(split), edge_node_signer=bool(acts),
+             refused=bool(refused))
+        if not split or not acts or refused:
+            step.fail(f"split_home_NOT:{n.name}",
+                      "the node must boot split (an actor key, a minted node key) and edge must act "
+                      "as the node with the node key", [n],
+                      r"configured key is an ACTOR|edge acts as the node|edge refused this node")
+            ok = False
+    return ok
+
 def chat(mesh: Mesh, args: Any) -> Record:
     """Two people, each on their own node, add each other and key a pair room,
     using only the routes a released node exposes. The CIRISServer#698 path."""
@@ -79,10 +144,15 @@ CHAT — two people, each on their own node, one pair room, one message (CSD-091
               only (CC 5.4.6, CIRISEdge#499) — this choice decides whether bodies can cross.
   routes:     production only — self-key-record + /v1/federation/peering, /v1/contacts, /v1/chat.
   proves, in order: boot → claim → announce → peer → owner keys cross → contacts → the same
-              room id on both → the room KEYS (the #698 claim) → a body crosses (CSD-091's row).""")
+              room id on both → the room KEYS (the #698 claim) → a body crosses (CSD-091's row).
+  SPLIT_HOME=1: both people's nodes boot split, as an agent install does.""")
+    split = _split_home(mesh)
     a = mesh.add("alice")
     b = mesh.add("bob", dial=[a] if args.direct else None)
-    step("booted", alice=a.url, bob=b.url, canonical=mesh.canonical.url, topology=topology)
+    step("booted", alice=a.url, bob=b.url, canonical=mesh.canonical.url, topology=topology,
+         split_home=split)
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
     a.claim("alice-person")
     b.claim("bob-person")
     step("claimed", alice_owner=a.owner_key_id, bob_owner=b.owner_key_id)
@@ -1560,9 +1630,14 @@ def av_member(mesh: Mesh, args: Any) -> Record:
     step = Steps(f"""
 AV MEMBER — the production call routes, frames socket and events.
   proves:  join as the member → ticketed socket → {secs} s of 20 ms Opus frames both ways →
-           each hears >= 99% of the other → a leave is seen as attendee_left.""")
+           each hears >= 99% of the other → a leave is seen as attendee_left.
+  SPLIT_HOME=1: both nodes boot split, as an agent install does. AV_VIDEO=1: join with video.""")
+    split = _split_home(mesh)
+    video = os.environ.get("AV_VIDEO") == "1"
     a = mesh.add("alice")
     b = mesh.add("bob")
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
     for n in (a, b):
         n.claim(f"{n.name}-person")
         n.announce()
@@ -1583,7 +1658,7 @@ AV MEMBER — the production call routes, frames socket and events.
     step("feature_declared", features=feats)
     joins = {}
     for n in (a, b):
-        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": False})
+        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": video})
         if st != 200:
             step.fail(f"join_refused:{n.name}", "the member join was refused", [a, b],
                       r"call|join_call|CallError", status=st, body=got)
@@ -1627,6 +1702,24 @@ AV MEMBER — the production call routes, frames socket and events.
     step("ready", seconds=round(time.time() - t_ready, 2),
          budgets={n: next(e.get("frame_budget_bytes") for e in events[n] if e.get("type") == "ready")
                   for n in events})
+    # A LEG BEFORE THE FIRST FRAME, as a client waits for one and as CIRISAgent's
+    # lane does. `ready` says the socket is open, not that a media path exists:
+    # frames sent before the leg forms are dropped, and on a 3 s video stage
+    # that alone was 15 of 150 (10%) against a 99% bar (2026-11-19, PR #884).
+    t_leg = time.time()
+
+    def both_legs() -> Any:
+        for n in (a, b):
+            _, cs = n.api("GET", f"/v1/chat/{room}/call")
+            if not ((cs or {}).get("joined") or {}).get("legs"):
+                return None
+        return True
+    try:
+        wait_for("a media leg on both sides", both_legs, 30, every=0.2)
+    except MeshError:
+        step.fail("no_leg", "a media leg never formed on one side", [a, b], r"call|leg|direct|relay")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("legs_formed", seconds=round(time.time() - t_leg, 2))
     frame = bytes([1, 0xFF, 0, 0, 0]) + opus
     sent = {"alice": 0, "bob": 0}
     t0 = time.time()
@@ -1677,6 +1770,165 @@ AV MEMBER — the production call routes, frames socket and events.
     if not ok:
         step.fail("member_call", "each side must hear >= 99% and the node must declare chat:call",
                   [a, b], r"call|frames|publish")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
+def av_share(mesh: Mesh, args: Any) -> Record:
+    """Desktop, app or window sharing (CSD-134; edge v45 `Call::add_stream`): two
+    people in a call, both on their call stream; alice shares her screen as a
+    SECOND stream (POST /v1/chat/{room}/call/share, its own ticketed frames
+    socket); bob sees `stream_added {kind: share}` and `share_started` with
+    alice's person, and her share frames under the share's stream id while her
+    call stream keeps flowing; alice stops (DELETE) and bob sees `share_stopped`
+    and `stream_ended`; the call goes on. SPLIT_HOME=1|fold as av_member.
+    Env AV_SECONDS (5): how long each side sends."""
+    import struct
+    import threading
+    import websocket  # websocket-client
+    secs = int(os.environ.get("AV_SECONDS", "5"))
+    step = Steps(f"""
+AV SHARE — a screen or window share beside the call (0.5.250).
+  proves:  join → share as a second stream → the other side sees it start, named and
+           kinded, and gets its frames under the share's own stream while the call
+           stream flows → stop → the other side sees it stop → the call goes on.
+  SPLIT_HOME=1|fold: both nodes boot split.""")
+    split = _split_home(mesh)
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    if split and not _split_held(step, [a, b]):
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+    joins = {}
+    for n in (a, b):
+        st, got = n.api("POST", f"/v1/chat/{room}/call", {"video": True})
+        if st != 200:
+            step.fail(f"join_refused:{n.name}", "the member join was refused", [a, b],
+                      r"call|join_call|CallError", status=st, body=got)
+            return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+        joins[n.name] = got
+    step("joined", call_streams={k: v.get("stream_id") for k, v in joins.items()})
+
+    by_stream = {"alice": {}, "bob": {}}
+    events = {"alice": [], "bob": []}
+
+    def reader(name: str, ws: Any) -> None:
+        while True:
+            try:
+                op, data = ws.recv_data()
+            except Exception:  # noqa: BLE001
+                return
+            if op == websocket.ABNF.OPCODE_BINARY:
+                pl = struct.unpack(">H", data[5:7])[0]
+                sid = data[7 + pl:7 + pl + 32].hex()
+                by_stream[name][sid] = by_stream[name].get(sid, 0) + 1
+            elif op == websocket.ABNF.OPCODE_TEXT:
+                events[name].append(json.loads(data))
+            elif op == websocket.ABNF.OPCODE_CLOSE:
+                return
+
+    socks = {}
+    for n in (a, b):
+        url = n.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/frames?ticket=" + \
+            joins[n.name]["frames_ticket"]
+        socks[n.name] = websocket.create_connection(url, timeout=10)
+        threading.Thread(target=reader, args=(n.name, socks[n.name]), daemon=True).start()
+    wait_for("both call sockets to say ready", lambda: True if all(
+        any(e.get("type") == "ready" for e in events[n]) for n in events) else None, 60, every=0.2)
+
+    st, share = a.api("POST", f"/v1/chat/{room}/call/share", {})
+    if st != 200:
+        step.fail("share_refused", "POST …/call/share was refused", [a],
+                  r"share|add_stream|CallError", status=st, body=share)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    sid = share["stream_id"]
+    step("share_started", stream_id=sid, kind=share.get("kind"),
+         budget=share.get("frame_budget_bytes"))
+    st2, again = a.api("POST", f"/v1/chat/{room}/call/share", {})
+    step("one_share_per_device", status=st2, reason_id=(again or {}).get("reason_id"))
+    surl = a.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/share/frames?ticket=" + \
+        share["frames_ticket"]
+    share_ws = websocket.create_connection(surl, timeout=10)
+    op, first = share_ws.recv_data()
+    share_ready = json.loads(first) if op == websocket.ABNF.OPCODE_TEXT else {}
+    step("share_socket_ready", ready=share_ready)
+
+    call_frame = bytes([1, 0xFF, 0, 0, 0]) + b"\x01" * 120
+    screen_frame = bytes([1, 0xFF, 0, 0, 0]) + b"\x02" * 900
+    sent = {"call": 0, "share": 0}
+    t0 = time.time()
+    tick = 0
+    while time.time() - t0 < secs:
+        socks["alice"].send_binary(call_frame)
+        sent["call"] += 1
+        if tick % 2 == 0:
+            share_ws.send_binary(screen_frame)
+            sent["share"] += 1
+        tick += 1
+        time.sleep(max(0.0, t0 + tick * 0.02 - time.time()))
+    time.sleep(2)
+    bob_share = by_stream["bob"].get(sid, 0)
+    bob_call = by_stream["bob"].get(joins["alice"]["stream_id"], 0)
+    started = next((e for e in events["bob"] if e.get("type") == "share_started"), {})
+    added = next((e for e in events["bob"] if e.get("type") == "stream_added"
+                  and e.get("stream_id") == sid), {})
+    step("bob_sees_the_share", share_frames=bob_share, share_sent=sent["share"],
+         call_frames=bob_call, call_sent=sent["call"], share_started=started,
+         stream_added=added, streams=by_stream["bob"])
+
+    st3, stopped = a.api("DELETE", f"/v1/chat/{room}/call/share")
+    step("share_stopped_by_alice", status=st3, answer=stopped)
+    try:
+        wait_for("bob to see share_stopped", lambda: True if any(
+            e.get("type") == "share_stopped" for e in events["bob"]) else None, 30, every=0.5)
+    except MeshError:
+        pass
+    stopped_ev = next((e for e in events["bob"] if e.get("type") == "share_stopped"), {})
+    ended_ev = next((e for e in events["bob"] if e.get("type") == "stream_ended"
+                     and e.get("stream_id") == sid), {})
+    before = by_stream["bob"].get(joins["alice"]["stream_id"], 0)
+    for _ in range(50):
+        socks["alice"].send_binary(call_frame)
+        time.sleep(0.02)
+    time.sleep(2)
+    call_after = by_stream["bob"].get(joins["alice"]["stream_id"], 0) - before
+    _, gs = a.api("GET", f"/v1/chat/{room}/call")
+    step("after_the_share", share_stopped=stopped_ev, stream_ended=ended_ev,
+         call_frames_after=call_after, call_live=(gs or {}).get("live"))
+    for ws in (*socks.values(), share_ws):
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+    ok = (share.get("kind") == "share" and st2 == 409
+          and (again or {}).get("reason_id") == "call.share_already_live"
+          and share_ready.get("type") == "ready"
+          and bob_share >= 0.95 * sent["share"] and bob_call >= 0.95 * sent["call"]
+          and started.get("person") == a.owner_key_id and added.get("kind") == "share"
+          and st3 == 200 and stopped_ev.get("stream_id") == sid
+          and call_after >= 45)
+    record = {"scenario": "av_share", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+              "versions": _versions(), "seconds": secs, "sent": sent,
+              "bob_received": {"share": bob_share, "call": bob_call}, "split_home": split,
+              "verdict": "PASS" if ok else "FAIL"}
+    _evidence(record, "av_share")
+    if not ok:
+        step.fail("screen_share", "the share must start, cross under its own stream beside the "
+                  "call, and stop, with the call going on", [a, b], r"share|stream|publish")
         return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
     return {"verdict": "PASS", "steps": step.log}
 
@@ -3859,6 +4111,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "big_room": big_room,
     "av_mesh": av_mesh,
     "av_member": av_member,
+    "av_share": av_share,
     "decisions": decisions,
     "av_echo": av_echo,
     "pair_unannounced": pair_unannounced,

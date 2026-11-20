@@ -2920,6 +2920,10 @@ async fn list_decisions(
 #[derive(Deserialize)]
 struct AnswerBody {
     answer: String,
+    /// A deferral that proposes an identity amendment: the SHA-256 of the
+    /// exact text the owner approves (`agent_deferral::sign_deferral_response`).
+    #[serde(default)]
+    amendment_digest: Option<String>,
 }
 
 /// `POST /v1/self/decisions/{id}/answer {answer: "approve"|"decline"}`.
@@ -2962,6 +2966,7 @@ async fn answer_decision(
             st.user_seed_dir.clone(),
             request_id,
             answer == "approve",
+            b.amendment_digest.as_deref(),
         )
         .await
         {
@@ -2983,7 +2988,7 @@ async fn answer_decision(
                     E::NotSignedIn => StatusCode::UNAUTHORIZED,
                     E::Delegated | E::ResolverHasNoKey => StatusCode::FORBIDDEN,
                     E::NoIdentity | E::ResponseAlreadyUsed(_) => StatusCode::CONFLICT,
-                    E::Unauthorized(_) => StatusCode::FORBIDDEN,
+                    E::Unauthorized(_) | E::AmendmentDigestMismatch(_) => StatusCode::FORBIDDEN,
                     E::Store(_) => StatusCode::SERVICE_UNAVAILABLE,
                 };
                 refuse(status, e.reason_id(), e.to_string())

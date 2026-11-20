@@ -2100,6 +2100,14 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                         Arc::clone(&engine),
                         cfg.home.join("logs"),
                     ))
+                    // GET /v1/telemetry/otlp/metrics — edge's telemetry as OTLP
+                    // JSON, operator-gated like the logs (the client's call "?"
+                    // panel reads the per-leg series from here).
+                    .merge(crate::telemetry_otlp::router(
+                        Arc::clone(&engine),
+                        edge.metrics(),
+                        this_node.clone(),
+                    ))
                     // Data page: owner-gated data wipe (reset-account = data-only;
                     // wipe-signing-key = data+keys) + GET /v1/my-data/lens-identifier.
                     .merge(crate::system_data::router(Arc::clone(&engine), cfg.clone()));
@@ -2160,6 +2168,9 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 } else {
                     r.merge(crate::diag::read_router())
                 };
+                // The desktop app stops the node before it wipes the home
+                // (loopback, direct, never on a server; `local_shutdown`).
+                let r = r.merge(crate::local_shutdown::router());
                 crate::compose_status::mark("router_built");
                 r
             },
@@ -4385,6 +4396,28 @@ impl ciris_verify_core::self_at_login::SelfSigner for EngineSelfSigner {
     }
 }
 
+/// The `identity_type` the configured key registers under: `node`. A
+/// test-anchor build under `CIRIS_TESTING_MODE=true` reads
+/// `CIRIS_TEST_CONFIGURED_KEY_TYPE=agent` instead, so the configured key
+/// registers as an AGENT the way an agent install's engine key does, and
+/// [`crate::node_key::resolve_node_identity`] splits the home through its
+/// production branch (a minted node key, the actor key kept). The native mesh's
+/// split-home runs (`SPLIT_HOME=1`) use it to test calls and chat on the
+/// topology every agent install has (Eric's laptop, 2026-11-18). A production
+/// build has no such reader: the `cfg` removes it.
+fn configured_key_identity_type() -> &'static str {
+    use ciris_persist::federation::types::identity_type;
+    #[cfg(feature = "test-anchor")]
+    {
+        if std::env::var("CIRIS_TESTING_MODE").as_deref() == Ok("true")
+            && std::env::var("CIRIS_TEST_CONFIGURED_KEY_TYPE").as_deref() == Ok("agent")
+        {
+            return identity_type::AGENT;
+        }
+    }
+    identity_type::NODE
+}
+
 pub(crate) async fn build_self_key_record(
     engine: &Arc<Engine>,
     _cfg: &ServerConfig,
@@ -4404,7 +4437,7 @@ pub(crate) async fn build_self_key_record(
     let valid_from = chrono::Utc::now().to_rfc3339();
     let v_rec = produce_self_key_record(
         &identity,
-        ciris_persist::federation::types::identity_type::NODE,
+        configured_key_identity_type(),
         &valid_from,
         crate::identity_ttl::valid_until_str().as_deref(),
         &[],
@@ -4485,6 +4518,23 @@ async fn setup_peer_replication(
     // ALIAS — reading consent by the alias returned 0 peers from a corpus whose
     // grants the signer identity authored, and the empty topology then clobbered
     // the live one (envelopes_sent=0 under a fully green transport).
+    // A split home's NODE key is the transport's occurrence, but the edge's
+    // signer is the engine's ACTOR key. Edge acts "as the node" (a call's
+    // chunk-key binding, the node co-scrub) with the signer the host hands it,
+    // so hand it the node's (CIRISEdge 45.1.6). Before this every call on an
+    // agent install failed `call.plumbing` (Eric's laptop, 2026-11-18).
+    if let Some(node_signer) = crate::node_key::held_node_edge_signer() {
+        let key = node_signer.key_id.clone();
+        match edge.set_node_signer(node_signer) {
+            Ok(()) => tracing::info!(node_key_id = %key, "edge acts as the node with the node key"),
+            Err(e) => tracing::error!(
+                node_key_id = %key,
+                error = %e,
+                "edge refused this node's signer — calls and node co-scrubs on this split home \
+                 will fail"
+            ),
+        }
+    }
     let started = start_replication_runtime(engine, edge, edge.signer_key_id()).await;
     // A newcomer gets this node's room keys at their seat, not at the next
     // content write (CC C559, #874): the seat worker listens to edge's roster
