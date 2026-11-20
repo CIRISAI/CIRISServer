@@ -3488,7 +3488,9 @@ mod python {
     /// (CIRISAgent#1316). `prev` places it in the identity profile chain (rc21
     /// §3): `None` is the BASE link (no `refs.prev`), a row id the amendment it
     /// follows (`refs: {"prev": id}`, signed; an admitted amendment of this
-    /// agent, else `identity_amendment_unauthorized`). Checks
+    /// agent), or `template:<64 hex>` (a shipped template's derived base, named
+    /// by the template's checksum); anything else is
+    /// `identity_amendment_unauthorized`. Checks
     /// CC 3.1.5 first: `authorized_by` must be an admitted
     /// `deferral:response:approved:v1` about this agent, ANSWERING `request_id`
     /// (this agent's deferral), signed by the node's owner (the seated WA);
