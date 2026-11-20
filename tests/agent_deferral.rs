@@ -704,3 +704,51 @@ async fn an_amendment_names_the_link_it_follows_and_the_base_names_none() {
         "refused as unauthorized: {err:?}"
     );
 }
+
+/// Eric 2026-11-20 ("the template ships pre-approved"): over a shipped
+/// template's derived base, the first amendment names it as
+/// `template:<template checksum>`, stored verbatim. Anything else that is not
+/// an amendment row of this agent is refused.
+#[tokio::test]
+async fn the_first_amendment_over_a_shipped_template_names_its_checksum() {
+    let owner = pen("owner-fedid", 0x33);
+    let (engine, agent) = owned_agent(&owner).await;
+    const CHECKSUM: &str = "0515a63e8feab3acdd361ea047d27255dbc75382a0f00ab19e7859bfcb75e58f";
+    let sentinel = format!("template:{CHECKSUM}");
+
+    let req = emit_deferral_request(&engine, &agent, &request(None))
+        .await
+        .unwrap();
+    let resp = sign_deferral_response(&engine, &owner, &req, true, Some(DIGEST))
+        .await
+        .unwrap();
+    let first =
+        emit_identity_amendment_after(&engine, &agent, DIGEST, &resp, &req, Some(&sentinel))
+            .await
+            .expect("a template sentinel names the derived base");
+    assert_eq!(
+        row(&engine, &first).await.attestation_envelope["refs"]["prev"],
+        sentinel.as_str()
+    );
+
+    for bad in [
+        format!("template:{}", CHECKSUM.to_uppercase()),
+        format!("template:{}", &CHECKSUM[..63]),
+        "template:".to_string(),
+        format!("tmpl:{CHECKSUM}"),
+    ] {
+        let mut r = request(None);
+        r.deferral_id = format!("def-{}", bad.len());
+        let req = emit_deferral_request(&engine, &agent, &r).await.unwrap();
+        let resp = sign_deferral_response(&engine, &owner, &req, true, Some(DIGEST))
+            .await
+            .unwrap();
+        let err = emit_identity_amendment_after(&engine, &agent, DIGEST, &resp, &req, Some(&bad))
+            .await
+            .expect_err("not a template sentinel and not an amendment row");
+        assert!(
+            matches!(err, AgentRowError::Unauthorized(_)),
+            "{bad}: {err:?}"
+        );
+    }
+}

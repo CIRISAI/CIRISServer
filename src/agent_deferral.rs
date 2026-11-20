@@ -485,6 +485,24 @@ pub async fn emit_identity_amendment(
 pub const REFS: &str = "refs";
 /// The member under [`REFS`].
 pub const PREV: &str = "prev";
+/// A `prev` naming a shipped template's DERIVED base link (Eric, 2026-11-20:
+/// "the template ships pre-approved"): `template:<64 lowercase hex>`, the
+/// sha256 of the template file, as its holder-signed pre-approved manifest
+/// lists it. No row stands for that base; the agent verifies the manifest and
+/// the template itself, and the first amendment names it by this sentinel.
+pub const TEMPLATE_PREV_PREFIX: &str = "template:";
+
+/// The template checksum a `prev` of the form `template:<64 hex>` names, or
+/// `None` when `prev` is not one (then it must be an amendment row id).
+#[must_use]
+pub fn template_base(prev: &str) -> Option<&str> {
+    let hex = prev.strip_prefix(TEMPLATE_PREV_PREFIX)?;
+    (hex.len() == 64
+        && hex
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(hex)
+}
 
 /// [`emit_identity_amendment`] at a position in the agent's identity profile
 /// chain (rc21 §3; CIRISAgent 2.23.1 `deferral_rows.emit_base_link`).
@@ -493,7 +511,10 @@ pub const PREV: &str = "prev";
 ///   and its `amendment_digest` is the base template's.
 /// - `prev = Some(id)`: the link follows the amendment `id`. The envelope
 ///   carries `refs: {"prev": id}`, inside the signature. `id` must be an
-///   admitted `identity_amendment:v1` about this same agent.
+///   admitted `identity_amendment:v1` about this same agent, or
+///   `template:<64 lowercase hex>` ([`template_base`]): the first amendment
+///   over a shipped, pre-approved template's derived base, named by the
+///   template's checksum. Any other value is refused.
 ///
 /// The agent reads the chain back through `deferral_rows`, which returns the
 /// envelope whole. Persist v61's admission reads only `amendment_digest`,
@@ -603,7 +624,7 @@ pub async fn emit_identity_amendment_after(
 
     // The link it follows: an admitted amendment of THIS agent, or none (the
     // base link).
-    if let Some(p) = prev {
+    if let Some(p) = prev.filter(|p| template_base(p).is_none()) {
         nonempty("prev", p)?;
         dir.get_attestation(p)
             .await
