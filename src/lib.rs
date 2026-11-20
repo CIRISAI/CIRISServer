@@ -3484,7 +3484,11 @@ mod python {
 
     #[pyfunction]
     /// `ciris_server.emit_identity_amendment(amendment_digest, authorized_by,
-    /// request_id)` → the amendment's `attestation_id` (CIRISAgent#1316). Checks
+    /// request_id, prev=None)` → the amendment's `attestation_id`
+    /// (CIRISAgent#1316). `prev` places it in the identity profile chain (rc21
+    /// §3): `None` is the BASE link (no `refs.prev`), a row id the amendment it
+    /// follows (`refs: {"prev": id}`, signed; an admitted amendment of this
+    /// agent, else `identity_amendment_unauthorized`). Checks
     /// CC 3.1.5 first: `authorized_by` must be an admitted
     /// `deferral:response:approved:v1` about this agent, ANSWERING `request_id`
     /// (this agent's deferral), signed by the node's owner (the seated WA);
@@ -3492,23 +3496,25 @@ mod python {
     /// approval authorises one amendment (`deferral.response_already_used`).
     #[pyo3(
         name = "emit_identity_amendment",
-        signature = (amendment_digest, authorized_by, request_id)
+        signature = (amendment_digest, authorized_by, request_id, prev=None)
     )]
     fn py_emit_identity_amendment(
         py: Python<'_>,
         amendment_digest: String,
         authorized_by: String,
         request_id: String,
+        prev: Option<String>,
     ) -> PyResult<String> {
         py.detach(|| {
             let (engine, rt) = agent_rows_rt("emit_identity_amendment")?;
             let node = this_node_key(rt, &engine)?;
-            rt.block_on(crate::agent_deferral::emit_identity_amendment(
+            rt.block_on(crate::agent_deferral::emit_identity_amendment_after(
                 &engine,
                 &node,
                 &amendment_digest,
                 &authorized_by,
                 &request_id,
+                prev.as_deref(),
             ))
             .map_err(agent_row_err)
         })
