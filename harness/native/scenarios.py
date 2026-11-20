@@ -1702,6 +1702,24 @@ AV MEMBER — the production call routes, frames socket and events.
     step("ready", seconds=round(time.time() - t_ready, 2),
          budgets={n: next(e.get("frame_budget_bytes") for e in events[n] if e.get("type") == "ready")
                   for n in events})
+    # A LEG BEFORE THE FIRST FRAME, as a client waits for one and as CIRISAgent's
+    # lane does. `ready` says the socket is open, not that a media path exists:
+    # frames sent before the leg forms are dropped, and on a 3 s video stage
+    # that alone was 15 of 150 (10%) against a 99% bar (2026-11-19, PR #884).
+    t_leg = time.time()
+
+    def both_legs() -> Any:
+        for n in (a, b):
+            _, cs = n.api("GET", f"/v1/chat/{room}/call")
+            if not ((cs or {}).get("joined") or {}).get("legs"):
+                return None
+        return True
+    try:
+        wait_for("a media leg on both sides", both_legs, 30, every=0.2)
+    except MeshError:
+        step.fail("no_leg", "a media leg never formed on one side", [a, b], r"call|leg|direct|relay")
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    step("legs_formed", seconds=round(time.time() - t_leg, 2))
     frame = bytes([1, 0xFF, 0, 0, 0]) + opus
     sent = {"alice": 0, "bob": 0}
     t0 = time.time()

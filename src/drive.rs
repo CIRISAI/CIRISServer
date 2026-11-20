@@ -3114,6 +3114,18 @@ async fn file_rendition(
     Query(rq): Query<RenditionQuery>,
 ) -> Response {
     use crate::media_render as mr;
+    // The guard first, before even the query is read (the drive's route gate:
+    // a route that answers on its own is how the read side drifted once).
+    let q = FileQuery {
+        cohort: rq.cohort.clone(),
+        room_id: rq.room_id.clone(),
+        raw: None,
+    };
+    let (found, described, viewer) = match open_for_viewer(&st, &headers, &attestation_id, &q).await
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
     let size_token = rq.size.as_deref().unwrap_or("display");
     let size = match size_token {
         "info" => None,
@@ -3140,16 +3152,6 @@ async fn file_rendition(
                 )
             }
         },
-    };
-    let q = FileQuery {
-        cohort: rq.cohort.clone(),
-        room_id: rq.room_id.clone(),
-        raw: None,
-    };
-    let (found, described, viewer) = match open_for_viewer(&st, &headers, &attestation_id, &q).await
-    {
-        Ok(v) => v,
-        Err(e) => return e,
     };
     let (bytes, _) = match open_whole(&st, &found, &viewer).await {
         Ok(b) => b,
