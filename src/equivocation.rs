@@ -1074,7 +1074,7 @@ pub async fn run_pass(
 /// Spawn the periodic detector. Returns the join handle; the task runs for the
 /// node's lifetime and keeps one [`ScanState`] across passes.
 pub fn spawn(engine: Arc<Engine>, cfg: DetectorConfig) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("equivocation", async move {
         // The node's own derived key — needed for the read admission, not for
         // any exemption. Resolve once: it cannot change under a running node.
         let node_key_id = match engine.local_derived_key_id().await {

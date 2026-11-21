@@ -69,7 +69,8 @@ async fn get_metrics(State(st): State<OtlpState>, RawQuery(q): RawQuery) -> Resp
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    Json(render(&flat, &st.node_key_id, now, &filter)).into_response()
+    let server = crate::workload::snapshot();
+    Json(render(&flat, &server, &st.node_key_id, now, &filter)).into_response()
 }
 
 /// `attr=k:v` pairs, percent-decoded. A pair without `:` is ignored.
@@ -304,9 +305,11 @@ fn histogram_metric(
     }))
 }
 
-/// The whole export: one resource (this node), one scope (edge).
+/// The whole export: one resource (this node), two scopes: edge's catalogue, and the
+/// server's own workload series (`crate::workload`, FSD/WORKLOAD_ATTRIBUTION.md A2).
 pub fn render(
     flat: &FlatMetrics,
+    server: &crate::workload::Snapshot,
     node_key_id: &str,
     now: u128,
     filter: &[(String, String)],
@@ -325,12 +328,176 @@ pub fn render(
                 attr("service.version", env!("CARGO_PKG_VERSION")),
                 attr("ciris.node.key_id", node_key_id),
             ]},
-            "scopeMetrics": [{
-                "scope": { "name": "ciris-edge" },
-                "metrics": metrics,
-            }],
+            "scopeMetrics": [
+                {
+                    "scope": { "name": "ciris-edge" },
+                    "metrics": metrics,
+                },
+                {
+                    "scope": { "name": "ciris-server" },
+                    "metrics": server_metrics(server, now, filter),
+                },
+            ],
         }]
     })
+}
+
+fn pairs(a: &[(&str, &str)]) -> Vec<(String, String)> {
+    a.iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
+}
+
+/// A histogram data point from a workload histogram.
+fn hist_point(attrs: &[(String, String)], h: &crate::workload::Hist, now: u128) -> Value {
+    json!({
+        "attributes": attrs.iter().map(|(k, v)| attr(k, v)).collect::<Vec<_>>(),
+        "timeUnixNano": now.to_string(),
+        "count": h.count.to_string(),
+        "sum": h.sum_secs,
+        "explicitBounds": crate::workload::DURATION_BOUNDS_SECS,
+        "bucketCounts": h.counts.iter().map(u64::to_string).collect::<Vec<_>>(),
+    })
+}
+
+fn sum_of(name: &str, unit: &str, description: &str, points: Vec<Value>) -> Option<Value> {
+    (!points.is_empty()).then(|| {
+        json!({ "name": name, "unit": unit, "description": description,
+            "sum": { "aggregationTemporality": 2, "isMonotonic": true, "dataPoints": points } })
+    })
+}
+
+fn gauge_of(name: &str, unit: &str, description: &str, points: Vec<Value>) -> Option<Value> {
+    (!points.is_empty()).then(|| {
+        json!({ "name": name, "unit": unit, "description": description,
+            "gauge": { "dataPoints": points } })
+    })
+}
+
+fn hist_of(name: &str, unit: &str, description: &str, points: Vec<Value>) -> Option<Value> {
+    (!points.is_empty()).then(|| {
+        json!({ "name": name, "unit": unit, "description": description,
+            "histogram": { "aggregationTemporality": 2, "dataPoints": points } })
+    })
+}
+
+/// The server's `ciris.server.*` series. Labels are route templates, methods, status
+/// classes, loop names and log sites only (A8). The `?attr=` filter applies as to edge's.
+fn server_metrics(
+    s: &crate::workload::Snapshot,
+    now: u128,
+    filter: &[(String, String)],
+) -> Vec<Value> {
+    const CLASSES: [&str; 5] = ["1xx", "2xx", "3xx", "4xx", "5xx"];
+    let mut requests = Vec::new();
+    let mut durations = Vec::new();
+    for (route, method, st) in &s.routes {
+        for (i, n) in st.by_class.iter().enumerate() {
+            if *n == 0 {
+                continue;
+            }
+            let a = pairs(&[
+                ("http.route", route),
+                ("http.request.method", method),
+                ("http.response.status_class", CLASSES[i]),
+            ]);
+            if keeps(&a, filter) {
+                requests.push(point(&a, V::Int(*n), now));
+            }
+        }
+        let a = pairs(&[("http.route", route), ("http.request.method", method)]);
+        if st.duration.count > 0 && keeps(&a, filter) {
+            durations.push(hist_point(&a, &st.duration, now));
+        }
+    }
+    let mut ticks = Vec::new();
+    let mut loop_durations = Vec::new();
+    let mut intervals = Vec::new();
+    for (name, st) in &s.loops {
+        for (outcome, n) in [("ok", st.ok), ("error", st.error)] {
+            let a = pairs(&[("ciris.loop.name", name), ("ciris.loop.outcome", outcome)]);
+            if n > 0 && keeps(&a, filter) {
+                ticks.push(point(&a, V::Int(n), now));
+            }
+        }
+        let a = pairs(&[("ciris.loop.name", name)]);
+        if !keeps(&a, filter) {
+            continue;
+        }
+        if st.duration.count > 0 {
+            loop_durations.push(hist_point(&a, &st.duration, now));
+        }
+        intervals.push(point(&a, V::Real(st.interval_secs), now));
+    }
+    let mut suppressed = Vec::new();
+    for (site, n) in &s.suppressed {
+        let a = pairs(&[("ciris.log.site", site)]);
+        if keeps(&a, filter) {
+            suppressed.push(point(&a, V::Int(*n), now));
+        }
+    }
+    // Unlabelled facts about this build; a filter on any attribute drops them.
+    let unlabelled = |v: V| {
+        if filter.is_empty() {
+            vec![point(&[], v, now)]
+        } else {
+            Vec::new()
+        }
+    };
+    [
+        sum_of(
+            "ciris.server.http.requests",
+            "1",
+            "Responses per matched route template, method and status class",
+            requests,
+        ),
+        hist_of(
+            "ciris.server.http.duration",
+            "s",
+            "Request duration (to the response head) per route template and method",
+            durations,
+        ),
+        sum_of(
+            "ciris.server.loop.ticks",
+            "1",
+            "Background loop passes, by loop and outcome",
+            ticks,
+        ),
+        hist_of(
+            "ciris.server.loop.duration",
+            "s",
+            "Background loop pass duration",
+            loop_durations,
+        ),
+        gauge_of(
+            "ciris.server.loop.interval_secs",
+            "s",
+            "Each background loop's configured interval",
+            intervals,
+        ),
+        sum_of(
+            "ciris.server.log.suppressed_repeats",
+            "1",
+            "Repeated log lines counted instead of logged, by site",
+            suppressed,
+        ),
+        gauge_of(
+            "ciris.server.attribution.caller_label_cap",
+            "1",
+            "persist's caller-label cap in this build",
+            unlabelled(V::Int(s.caller_label_cap as u64)),
+        ),
+        gauge_of(
+            "ciris.server.attribution.fine_labels",
+            "1",
+            "1 when the server interns route-group and loop caller labels; 0 when every \
+             server read is credited to the one `server` label (persist's cap is too small)",
+            unlabelled(V::Int(u64::from(s.fine_labels))),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]
@@ -361,7 +528,7 @@ mod tests {
     fn a_live_snapshot_renders_through_the_catalogue() {
         let m = EdgeMetrics::new();
         let f = m.snapshot().flatten();
-        let v = render(&f, "node-1", 1, &[]);
+        let v = render(&f, &crate::workload::Snapshot::default(), "node-1", 1, &[]);
         let names: Vec<&str> = v["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
             .as_array()
             .unwrap()
@@ -397,18 +564,30 @@ mod tests {
             ],
             &[],
         );
-        let all = render(&f, "n", 1, &[]);
+        let all = render(&f, &crate::workload::Snapshot::default(), "n", 1, &[]);
         let m = metric(&all, spec.name).expect("rendered");
         let body = m.get("sum").or_else(|| m.get("gauge")).unwrap();
         assert_eq!(body["dataPoints"].as_array().unwrap().len(), 2, "{m}");
-        let only = render(&f, "n", 1, &[(key.to_owned(), "beta".to_owned())]);
+        let only = render(
+            &f,
+            &crate::workload::Snapshot::default(),
+            "n",
+            1,
+            &[(key.to_owned(), "beta".to_owned())],
+        );
         let m = metric(&only, spec.name).expect("filtered");
         let body = m.get("sum").or_else(|| m.get("gauge")).unwrap();
         let pts = body["dataPoints"].as_array().unwrap();
         assert_eq!(pts.len(), 1);
         assert_eq!(pts[0]["asInt"], "4");
         // A filter nothing matches drops the metric: absent, never zero.
-        let none = render(&f, "n", 1, &[(key.to_owned(), "gamma".to_owned())]);
+        let none = render(
+            &f,
+            &crate::workload::Snapshot::default(),
+            "n",
+            1,
+            &[(key.to_owned(), "gamma".to_owned())],
+        );
         assert!(metric(&none, spec.name).is_none());
     }
 
@@ -426,7 +605,7 @@ mod tests {
             ],
             &[(&format!("{}.sum", spec.field), 2.5)],
         );
-        let v = render(&f, "n", 1, &[]);
+        let v = render(&f, &crate::workload::Snapshot::default(), "n", 1, &[]);
         let p = &metric(&v, spec.name).expect("rendered")["histogram"]["dataPoints"][0];
         assert_eq!(p["explicitBounds"], json!([0.1, 1.0]));
         assert_eq!(p["bucketCounts"], json!(["2", "3", "1"]));
@@ -442,6 +621,98 @@ mod tests {
                 ("ciris.call.id".to_owned(), "abc".to_owned()),
                 ("ciris.media.kind".to_owned(), "video".to_owned())
             ]
+        );
+    }
+
+    /// The server's own series render as `ciris.server.*`, labelled by template, method,
+    /// class, loop and site only, and the filter applies to them as to edge's.
+    #[test]
+    fn the_server_series_render_beside_edges() {
+        let mut counts = vec![0; crate::workload::DURATION_BOUNDS_SECS.len() + 1];
+        counts[6] = 3;
+        let h = crate::workload::Hist {
+            counts,
+            count: 3,
+            sum_secs: 0.3,
+        };
+        let route = crate::workload::RouteStats {
+            by_class: [0, 2, 0, 1, 0],
+            duration: h.clone(),
+        };
+        let lp = crate::workload::LoopStats {
+            interval_secs: 30.0,
+            ok: 5,
+            error: 1,
+            duration: h,
+        };
+        let server = crate::workload::Snapshot {
+            routes: vec![("/v1/chat/{room}/messages".to_owned(), "GET", route)],
+            loops: vec![("self_room", lp)],
+            suppressed: vec![("owner_pen", 47)],
+            fine_labels: false,
+            caller_label_cap: 32,
+        };
+        let v = render(&FlatMetrics::default(), &server, "n", 1, &[]);
+        let scope = &v["resourceMetrics"][0]["scopeMetrics"][1];
+        assert_eq!(scope["scope"]["name"], "ciris-server");
+        let find = |name: &str| {
+            scope["metrics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("{name} in {scope}"))
+        };
+        let req = find("ciris.server.http.requests");
+        let pts = req["sum"]["dataPoints"].as_array().unwrap();
+        assert_eq!(pts.len(), 2, "one point per non-zero status class");
+        let ok = pts
+            .iter()
+            .find(|p| p["attributes"].to_string().contains("2xx"))
+            .unwrap();
+        assert_eq!(ok["asInt"], "2");
+        assert!(ok["attributes"]
+            .to_string()
+            .contains("/v1/chat/{room}/messages"));
+        let dur = find("ciris.server.http.duration");
+        assert_eq!(dur["histogram"]["dataPoints"][0]["count"], "3");
+        let ticks = find("ciris.server.loop.ticks");
+        assert_eq!(ticks["sum"]["dataPoints"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            find("ciris.server.loop.interval_secs")["gauge"]["dataPoints"][0]["asDouble"],
+            30.0
+        );
+        assert_eq!(
+            find("ciris.server.log.suppressed_repeats")["sum"]["dataPoints"][0]["asInt"],
+            "47"
+        );
+        assert_eq!(
+            find("ciris.server.attribution.fine_labels")["gauge"]["dataPoints"][0]["asInt"],
+            "0"
+        );
+        // The filter: only the self_room loop's series survive.
+        let only = render(
+            &FlatMetrics::default(),
+            &server,
+            "n",
+            1,
+            &[("ciris.loop.name".to_owned(), "self_room".to_owned())],
+        );
+        let names: Vec<String> = only["resourceMetrics"][0]["scopeMetrics"][1]["metrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["name"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "ciris.server.loop.ticks",
+                "ciris.server.loop.duration",
+                "ciris.server.loop.interval_secs"
+            ],
+            "{names:?}"
         );
     }
 }

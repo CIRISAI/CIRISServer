@@ -669,7 +669,7 @@ pub fn spawn(
     config_rx: watch::Receiver<ResolvedConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("replication_reconcile", async move {
         // Phased, not bare `interval`: this loop and the config reconciler both
         // default to 30 s and on a plain interval ticked together every time.
         // See `loop_cadence` and CIRISServer#575 — the collision is what stalls

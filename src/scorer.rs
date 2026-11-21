@@ -286,7 +286,7 @@ pub fn spawn(
     engine: Arc<Engine>,
     mut config_rx: watch::Receiver<crate::config_reconcile::ResolvedConfig>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("scorer", async move {
         // ONE identity (#312/#315): the producer named INSIDE the capacity
         // envelope must be the same identity `emit_attestation_self` stamps as
         // the attester — the ENGINE signer's derived key, never a config alias

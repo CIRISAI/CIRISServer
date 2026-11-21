@@ -606,6 +606,9 @@ pub(crate) fn assert_test_anchor_disarmed(context: &str) {
 /// Gates federation peering + the replication reconciler; it does NOT touch
 /// substrate admission (CC 2.4.1.1 MUST-admit stays intact).
 pub mod withdraws_arbitrage;
+/// Workload attribution (`FSD/WORKLOAD_ATTRIBUTION.md`): the persist caller scope for every
+/// request and loop, the route and loop series, and quiet repeats.
+pub mod workload;
 
 pub use config::{Mode, PeerB, ServerConfig, Slices};
 

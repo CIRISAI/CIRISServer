@@ -283,7 +283,7 @@ pub fn spawn_release_watch(
     home: std::path::PathBuf,
     roster_key: Option<String>,
 ) {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("device_release", async move {
         let mut cadence = crate::loop_cadence::Cadence::new("device_release", WATCH_EVERY);
         loop {
             cadence.tick().await;

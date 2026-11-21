@@ -7634,7 +7634,7 @@ impl PairRoomDriver {
         self,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        crate::workload::spawn_loop("pair_rooms", async move {
             let mut schedule =
                 crate::loop_cadence::Cadence::new("pair_rooms", PAIR_ROOM_DRIVE_EVERY);
             loop {
