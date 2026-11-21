@@ -46,7 +46,17 @@ fn parse(raw: Option<&str>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
     let secs = i64::try_from(secs).ok()?;
     // Millisecond-exact, as every signed instant (persist `same_instant_ms`).
     let end = now + chrono::Duration::seconds(secs);
-    DateTime::from_timestamp_millis(end.timestamp_millis())
+    let mut ms = end.timestamp_millis();
+    // NEVER a whole second. verify v22.2.0's `Validity::checked` re-formats the
+    // signed `valid_until` with `SecondsFormat::AutoSi`, which drops a zero
+    // fraction ("…:15Z"), and persist refuses anything but the CC 2.6.2
+    // `.sssZ` form (CIRISPersist#659): about one boot in a thousand failed
+    // `self-register` (CIRISClient five-platform run 44867953009, 2026-11-21).
+    // One millisecond later keeps the instant ms-exact and the text `.001Z`.
+    if ms.rem_euclid(1000) == 0 {
+        ms += 1;
+    }
+    DateTime::from_timestamp_millis(ms)
 }
 
 /// This process's identity end, when a harness asked for one.
@@ -70,6 +80,37 @@ pub fn valid_until() -> Option<DateTime<Utc>> {
 #[must_use]
 pub fn valid_until_str() -> Option<String> {
     valid_until().map(|t| t.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+#[cfg(test)]
+mod whole_second_tests {
+    use super::*;
+
+    #[test]
+    fn an_end_on_a_whole_second_moves_one_millisecond() {
+        // A start whose end lands exactly on a second (the 2026-11-21 failure).
+        let now = DateTime::parse_from_rfc3339("2026-11-21T06:26:15.000Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let end = parse(Some("10800"), now).expect("an end");
+        assert_eq!(end.timestamp_millis().rem_euclid(1000), 1);
+        let text = end.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true);
+        assert_eq!(
+            text, "2026-11-21T09:26:15.001Z",
+            "AutoSi keeps the fraction"
+        );
+        // Any other end is left as it is.
+        let now = DateTime::parse_from_rfc3339("2026-11-21T05:43:26.523Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            parse(Some("10800"), now)
+                .unwrap()
+                .timestamp_millis()
+                .rem_euclid(1000),
+            523
+        );
+    }
 }
 
 #[cfg(test)]
