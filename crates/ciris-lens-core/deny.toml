@@ -75,7 +75,6 @@ ignore = [
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
     "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)
-    "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic (no CRL parsing here)
 
     # `unic-*` family unmaintained.
     # Transitive: edge v0.13.0+ → uniffi → rustpython-parser → unic-*.
@@ -99,7 +98,6 @@ ignore = [
     # sequences); 0177 is a missing Sync bound on PyCFunction::new_closure
     # (lens-core registers no closure pyfunctions, only #[pyfunction]/
     # #[pymethods]).
-    "RUSTSEC-2026-0176",
     "RUSTSEC-2026-0177",
 ]
 
