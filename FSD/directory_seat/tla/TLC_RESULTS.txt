@@ -1,0 +1,431 @@
+===== DirectorySeat
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished checking temporal properties in 00s at 2026-11-18 12:04:51
+Finished checking temporal properties in 01s at 2026-11-18 12:05:23
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  calculated (optimistic):  val = 3.5E-9
+933873 states generated, 74088 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 17.
+Finished in 36s at (2026-11-18 12:05:23)
+===== DirectorySeat_byz
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  calculated (optimistic):  val = 5.3E-12
+38649 states generated, 2744 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 13.
+Finished in 01s at (2026-11-18 12:05:26)
+===== DirectorySeat_firstcome (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:27.
+Error: Invariant Inv_NoLockout is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 3: <Join line 143, col 5 to line 149, col 54 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t1, ver |-> 0, signer |-> a, rec |-> "true"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> TRUE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> t1 @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 4: <Next line 213, col 8 to line 213, col 47 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t1, ver |-> 0, signer |-> a, rec |-> "true"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> TRUE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> t1 @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> t0 @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+100 states generated, 71 distinct states found, 60 states left on queue.
+The depth of the complete state graph search is 4.
+Finished in 01s at (2026-11-18 12:05:27)
+===== DirectorySeat_firstcome_live (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:29.
+Checking temporal properties for the current state space with 5205 total distinct states at (2026-11-18 12:05:32)
+Error: Temporal properties were violated.
+Error: The following behavior constitutes a counter-example:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 3: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "genesis" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 4: <Next line 213, col 8 to line 213, col 47 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "genesis" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> t0 @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 5: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "genesis" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> t0 @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 6: <Join line 143, col 5 to line 149, col 54 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "genesis" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t2, ver |-> 0, signer |-> b, rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> TRUE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> t2 @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> t0 @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 7: <Next line 214, col 8 to line 214, col 46 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "genesis" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t2, ver |-> 0, signer |-> b, rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> TRUE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> t2 @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> t0 @@ c :> "none") )
+/\ held = ( s1 :> {[key |-> b, tid |-> t2, ver |-> 0, signer |-> b, rec |-> "true"]} @@
+  s2 :> {} )
+State 8: Stuttering
+Finished checking temporal properties in 00s at 2026-11-18 12:05:32
+66503 states generated, 17524 distinct states found, 12319 states left on queue.
+Finished in 04s at (2026-11-18 12:05:32)
+===== DirectorySeat_noderive (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:33.
+Error: Invariant Inv_NeverSwapped is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 3: <Next line 214, col 8 to line 214, col 46 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = ( s1 :> {[key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"]} @@
+  s2 :> {} )
+15 states generated, 10 distinct states found, 6 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 01s at (2026-11-18 12:05:33)
+===== DirectorySeat_seatauthority (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:35.
+Error: Invariant Inv_NoAuthority is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <SeatMint line 195, col 5 to line 198, col 71 of module DirectorySeat>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = ( s1 :> {[key |-> a, tid |-> t1, ver |-> 1, signer |-> s1, rec |-> "true"]} @@
+  s2 :> {} )
+15 states generated, 10 distinct states found, 6 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 00s at (2026-11-18 12:05:35)
+===== DirectorySeat_serveowned (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:36.
+Error: Invariant Inv_OwnedRouteUnserved is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 3: <Join line 143, col 5 to line 149, col 54 of module DirectorySeat>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t1, ver |-> 0, signer |-> c, rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> TRUE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> t1)
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 4: <Next line 214, col 8 to line 214, col 46 of module DirectorySeat>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "genesis")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t1, ver |-> 0, signer |-> c, rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> TRUE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> t1)
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = ( s1 :> {[key |-> c, tid |-> t1, ver |-> 0, signer |-> c, rec |-> "true"]} @@
+  s2 :> {} )
+124 states generated, 70 distinct states found, 49 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 01s at (2026-11-18 12:05:36)
+===== DirectorySeat_noanchor (planted twin; the trace below is TLC's counterexample)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Finished computing initial states: 1 distinct state generated at 2026-11-18 12:05:38.
+Error: Invariant Inv_RootIsAnchor is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ root = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 2: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "none" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+State 3: <FetchBundle line 134, col 5 to line 138, col 71 of module DirectorySeat>
+/\ root = (a :> "genesis" @@ b :> "forged" @@ c :> "none")
+/\ misdirected = FALSE
+/\ net = { [key |-> a, tid |-> t0, ver |-> 1, signer |-> a, rec |-> "forged"],
+  [key |-> a, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> b, rec |-> "forged"],
+  [key |-> b, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> c, rec |-> "forged"],
+  [key |-> c, tid |-> t0, ver |-> 1, signer |-> "adv", rec |-> "true"] }
+/\ ver = (a :> 0 @@ b :> 0 @@ c :> 0)
+/\ joined = (a :> FALSE @@ b :> FALSE @@ c :> FALSE)
+/\ tid = (a :> "none" @@ b :> "none" @@ c :> "none")
+/\ resident = ( s1 :> (a :> "none" @@ b :> "none" @@ c :> "none") @@
+  s2 :> (a :> "none" @@ b :> "none" @@ c :> "none") )
+/\ held = (s1 :> {} @@ s2 :> {})
+13 states generated, 8 distinct states found, 4 states left on queue.
+The depth of the complete state graph search is 3.
+Finished in 00s at (2026-11-18 12:05:38)

@@ -1,0 +1,9 @@
+closes: DirectorySeat 74088 distinct states found, 0 states left, depth 17
+closes: DirectorySeat_byz 2744 distinct states found, 0 states left, depth 13
+twin fails as it must: DirectorySeat_firstcome (Inv_NoLockout) after 4 states in the trace
+twin fails as it must: DirectorySeat_firstcome_live (Prop_Registered) after 8 states in the trace
+twin fails as it must: DirectorySeat_noderive (Inv_NeverSwapped) after 3 states in the trace
+twin fails as it must: DirectorySeat_seatauthority (Inv_NoAuthority) after 2 states in the trace
+twin fails as it must: DirectorySeat_serveowned (Inv_OwnedRouteUnserved) after 4 states in the trace
+twin fails as it must: DirectorySeat_noanchor (Inv_RootIsAnchor) after 3 states in the trace
+ok=8 bad=0
