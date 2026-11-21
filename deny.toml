@@ -126,7 +126,6 @@ ignore = [
     "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
     "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)
-    "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic (no CRL parsing here)
 
     # persist v58 / verify 20.2.0 — mirrors persist's v58 rationale (5de50ebc).
     # zip 7.x extraction: all three advisories are in `ZipArchive::extract` /
