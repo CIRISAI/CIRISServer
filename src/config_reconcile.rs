@@ -643,7 +643,7 @@ pub fn spawn(
     notify: Arc<Notify>,
     mut shutdown: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("config_reconcile", async move {
         // Phased, not bare `interval`: this loop and the replication reconciler
         // both run at 30 s, so on a plain interval every tick of one landed on a
         // tick of the other — and a collision is the node's own read API

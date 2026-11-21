@@ -737,7 +737,7 @@ pub fn spawn(
     mut shutdown: watch::Receiver<bool>,
     scheduler: Option<Arc<crate::background_scheduler::BackgroundScheduler>>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("retention", async move {
         let mut cadence = RetentionConfig::from_resolved(&config_rx.borrow()).cadence;
         // Phased (see `loop_cadence`, CIRISServer#575).
         let mut schedule = crate::loop_cadence::Cadence::new("retention", cadence);

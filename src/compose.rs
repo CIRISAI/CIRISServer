@@ -2123,6 +2123,13 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
                 // body) to the node log file, so a failed request always leaves a
                 // complete server-side trace even when the client truncates it.
                 let r = r
+                    // WORKLOAD ATTRIBUTION (FSD/WORKLOAD_ATTRIBUTION.md A1/A2): each
+                    // handler's persist reads are credited to its route group, and its
+                    // response is counted against its matched route template. On
+                    // `Router::layer`, where `MatchedPath` is set.
+                    .layer(axum::middleware::from_fn(
+                        crate::workload::attribute_request,
+                    ))
                     .layer(axum::middleware::from_fn(
                         crate::http_log::log_error_responses,
                     ))
@@ -2307,7 +2314,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         let engine = Arc::clone(&engine);
         let node = this_node.clone();
         let config = config_rx.clone();
-        tokio::spawn(async move {
+        crate::workload::spawn_loop("announce_consent", async move {
             let mut cadence = crate::loop_cadence::Cadence::new(
                 "announce_consent",
                 crate::announced_relay::RELAY_REFRESH,
@@ -2468,7 +2475,7 @@ pub async fn serve_with_adapter(cfg: ServerConfig, adapter: Arc<dyn Adapter>) ->
         let engine_for_roster = Arc::clone(&engine);
         let room_escape_node = node_code.key_id.clone();
         let room_escape_seeds = crate::user_seed_dir(&cfg);
-        tokio::spawn(async move {
+        crate::workload::spawn_loop("self_room", async move {
             let period = std::time::Duration::from_secs(30);
             let mut schedule = crate::loop_cadence::Cadence::new("self_room", period);
             let mut last = None;
@@ -3675,6 +3682,9 @@ pub(crate) async fn resolve_user_signer(
     )
 }
 
+/// The quiet-repeat site of the owner-pen lookup (`crate::workload::say_on_change`).
+const OWNER_PEN_SITE: &str = "owner_pen";
+
 async fn resolve_user_signer_inner(
     engine: &Engine,
     auth: FedIdUse,
@@ -3704,15 +3714,25 @@ async fn resolve_user_signer_inner(
     // (`<seed_dir>/<alias>.backend`); fall back to the software seed file for
     // identities minted before the marker existed. Absent both ⇒ no fed-ID yet.
     let software_seed = seed_dir.join(format!("{user_key_id}.ed25519.seed"));
+    // Which identity the quiet-repeat state is about (never exported; the site is).
+    let owner_pen_key = format!("{}#{user_key_id}", seed_dir.display());
     let backend = match crate::identity::read_user_backend_marker(&seed_dir, user_key_id) {
         Some(label) => crate::identity::user_backend_from_label(&label),
         None if software_seed.exists() => crate::identity::UserIdentityBackend::Software,
         None => {
-            tracing::info!(
-                seed_dir = %seed_dir.display(),
-                "no responsible-user identity at the conventional path yet — create your \
-                 federation ID (POST /v1/self/identity) to enable POST /v1/setup/claim-remote"
-            );
+            // Loops ask for the owner's pen on every tick (the self room, the pair
+            // rooms, consent), and a remote-claimed node never holds it: this line
+            // ran 48 times an hour on the canonical. Said once per change; the
+            // repeats are counted (`ciris.server.log.suppressed_repeats{site=owner_pen}`,
+            // FSD/WORKLOAD_ATTRIBUTION.md A6).
+            if crate::workload::say_on_change(OWNER_PEN_SITE, &owner_pen_key, "absent") {
+                tracing::info!(
+                    seed_dir = %seed_dir.display(),
+                    "no responsible-user identity at the conventional path yet — create your \
+                     federation ID (POST /v1/self/identity) to enable POST /v1/setup/claim-remote \
+                     (said once; repeats are counted, not logged)"
+                );
+            }
             return Ok(None);
         }
     };
@@ -3721,11 +3741,13 @@ async fn resolve_user_signer_inner(
     // Ed25519 half per backend; the ML-DSA-65 half is the sealed PQC signer).
     let (signer, edge) =
         crate::identity::hardware_user_signers(backend, user_key_id, seed_dir).await?;
-    tracing::info!(
-        user_key_id = %user_key_id,
-        "responsible-user signer resolved for claim-remote (minted user identity at \
-         the conventional path — Server 0.5, no env)"
-    );
+    if crate::workload::say_on_change(OWNER_PEN_SITE, &owner_pen_key, "resolved") {
+        tracing::info!(
+            user_key_id = %user_key_id,
+            "responsible-user signer resolved for claim-remote (minted user identity at \
+             the conventional path — Server 0.5, no env; said once per change)"
+        );
+    }
     Ok(Some((Arc::new(signer), Arc::new(edge))))
 }
 
@@ -5166,7 +5188,10 @@ pub(crate) async fn start_replication_runtime(
         let keys = Arc::clone(&self_publish_keys);
         Arc::new(move || keys.read().expect("self_publish_keys poisoned").clone())
     };
-    tokio::spawn({
+    // Not a `loop_cadence` loop (it waits on a nudge, not a grid), so it registers itself
+    // with the loop registry and meters its own passes (`crate::workload`).
+    crate::workload::register_loop("self_publish", std::time::Duration::from_secs(30));
+    crate::workload::spawn_loop("self_publish", {
         // Nothing to capture: the engine, the node key and the set all live in
         // `SELF_PUBLISH` now, because `kick_replication` needs them too.
         async move {
@@ -5188,6 +5213,7 @@ pub(crate) async fn start_replication_runtime(
             let mut relay_owed = false;
             let mut nudged = false;
             loop {
+                let pass = crate::workload::LoopPass::begin("self_publish");
                 // THE SET CHANGED ⇒ CARRY THE ROWS. Adding the owner without a
                 // kick left the rows it unlocks (owner-binding, occurrences)
                 // waiting for the next cadence tick — and this task is the
@@ -5259,6 +5285,7 @@ pub(crate) async fn start_replication_runtime(
                 if relay_owed && kick_replication("announced relay set changed") {
                     relay_owed = false;
                 }
+                drop(pass);
                 let wait = if owed || relay_owed { 1 } else { 30 };
                 nudged = crate::announced_relay::wait_for_nudge(std::time::Duration::from_secs(
                     wait,
@@ -6096,7 +6123,7 @@ async fn build_edge(
 /// `Edge::arm_fold_host` in the fold. No lifecycle, no loop.
 fn spawn_scope_seal_loop(edge: &Edge) {
     if let Some(life) = edge.scope_lifecycle().cloned() {
-        tokio::spawn(async move {
+        crate::workload::spawn_loop("scope_seal", async move {
             let period = std::time::Duration::from_secs(60);
             let mut schedule = crate::loop_cadence::Cadence::new("scope_seal", period);
             loop {

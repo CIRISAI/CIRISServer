@@ -853,7 +853,7 @@ pub fn spawn(
     engine: Arc<Engine>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("session_claims", async move {
         let mut schedule =
             crate::loop_cadence::Cadence::new("session_claims", SESSION_CLAIM_RENEW_EVERY);
         tracing::info!(

@@ -700,7 +700,7 @@ pub async fn spawn(
     let first = refresh_once(&engine, &node_key_id).await;
     log_reading(&first, "mesh-config consumers primed");
     let (tx, rx) = watch::channel(Arc::new(first));
-    let join = tokio::spawn(async move {
+    let join = crate::workload::spawn_loop("mesh_config_effect", async move {
         // Phased (see `loop_cadence`, CIRISServer#575).
         let mut schedule =
             crate::loop_cadence::Cadence::new("mesh_config_effect", REFRESH_INTERVAL);

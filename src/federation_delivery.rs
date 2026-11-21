@@ -1944,7 +1944,7 @@ pub async fn run_federation_delivery(
     let reconcile_engine = Arc::clone(&engine);
     let reconcile_runtime = Arc::clone(&runtime);
     let reconcile_node_key = node_key_id.clone();
-    let reconcile_join = tokio::spawn(async move {
+    let reconcile_join = crate::workload::spawn_loop("federation_delivery", async move {
         // Phased (see `loop_cadence`, CIRISServer#575).
         let mut schedule = crate::loop_cadence::Cadence::new("federation_delivery", cadence);
         tracing::info!(

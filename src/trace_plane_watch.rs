@@ -259,7 +259,7 @@ pub async fn tick(
 /// composition with no HTTP ingest route, which reads `unreadable` and never a
 /// clean zero.
 pub fn spawn(engine: Arc<Engine>, refusals: Option<IngestRefusals>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::workload::spawn_loop("trace_plane_watch", async move {
         let mut watch = Watch::new();
         // The registry allocates the phase (CIRISServer#575): the first tick is
         // immediate — the first reading at once, as before — and every later

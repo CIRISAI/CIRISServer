@@ -201,6 +201,9 @@ pub struct Cadence {
     /// Held from a tick returning to the next `tick` call: this loop is
     /// mid-pass (`node_lifecycle::enter_background` waits for these).
     pass: Option<crate::node_lifecycle::PassGuard>,
+    /// The same pass, as the loop registry counts it (`crate::workload`): recorded with
+    /// its duration and outcome when the next `tick` starts.
+    meter: Option<crate::workload::LoopPass>,
 }
 
 impl Cadence {
@@ -225,8 +228,10 @@ impl Cadence {
             seq: 0,
             started: false,
             pass: None,
+            meter: None,
         };
         c.seq = c.first_seq_after(Instant::now());
+        crate::workload::register_loop(name, period);
         c
     }
 
@@ -291,8 +296,18 @@ impl Cadence {
     pub async fn tick(&mut self) {
         // The pass that the previous tick started is over.
         self.pass = None;
+        self.meter = None;
         self.wait_for_deadline().await;
         self.pass = Some(crate::node_lifecycle::PassGuard::begin());
+        self.meter = Some(crate::workload::LoopPass::begin(self.name));
+    }
+
+    /// Mark the pass in progress as failed, for the loop registry's outcome count
+    /// (`ciris.server.loop.ticks{outcome="error"}`). A pass not marked counts as ok.
+    pub fn pass_failed(&mut self) {
+        if let Some(m) = self.meter.as_mut() {
+            m.failed();
+        }
     }
 
     /// [`tick`](Self::tick)'s schedule, held while the node is backgrounded
@@ -360,6 +375,7 @@ impl Cadence {
         };
         self.base = epoch() + self.phase();
         self.seq = self.first_seq_after(Instant::now());
+        crate::workload::register_loop(self.name, self.period);
     }
 
     /// The period.
