@@ -374,9 +374,9 @@ fn gauge_of(name: &str, unit: &str, description: &str, points: Vec<Value>) -> Op
     })
 }
 
-fn hist_of(name: &str, description: &str, points: Vec<Value>) -> Option<Value> {
+fn hist_of(name: &str, unit: &str, description: &str, points: Vec<Value>) -> Option<Value> {
     (!points.is_empty()).then(|| {
-        json!({ "name": name, "unit": "s", "description": description,
+        json!({ "name": name, "unit": unit, "description": description,
             "histogram": { "aggregationTemporality": 2, "dataPoints": points } })
     })
 }
@@ -453,6 +453,7 @@ fn server_metrics(
         ),
         hist_of(
             "ciris.server.http.duration",
+            "s",
             "Request duration (to the response head) per route template and method",
             durations,
         ),
@@ -464,6 +465,7 @@ fn server_metrics(
         ),
         hist_of(
             "ciris.server.loop.duration",
+            "s",
             "Background loop pass duration",
             loop_durations,
         ),
