@@ -1,6 +1,6 @@
 [package]
 name = "ciris-server"
-version = "0.5.253" # 0.5.253 (OPENED): edge v45.1.8 / persist v61.4.2 / verify v22.2.0 — workload attribution (FSD/WORKLOAD_ATTRIBUTION.md): every request and background loop runs under a persist caller scope (route group / loop; one `server` label until persist raises its 32-label cap), per-route-template and per-loop series in GET /v1/telemetry/otlp/metrics (ciris.server.*), and a loop line repeated every tick is said once per change and counted (the owner-pen retry, 48/h on the canonical)
+version = "0.5.253" # 0.5.253 (OPENED): edge v45.1.9 / persist v61.4.3 / verify v22.2.0 — workload attribution (FSD/WORKLOAD_ATTRIBUTION.md): every request and background loop runs under a persist caller scope (route group / loop; one `server` label until persist raises its 32-label cap), per-route-template and per-loop series in GET /v1/telemetry/otlp/metrics (ciris.server.*), and a loop line repeated every tick is said once per change and counted (the owner-pen retry, 48/h on the canonical)
 # 0.5.252 (TAGGED 2026-11-20, 906ed2c7): edge v45.1.7 / persist v61.4.2 / verify v22.2.0 — a shipped template is pre-approved: an identity amendment may name a shipped template's DERIVED base as `prev="template:<template checksum>"` (stored verbatim in `refs.prev`), so the agent anchors its profile at first boot with no WA base-link deferral (Eric 2026-11-20, CIRISAgent 2.23.2)
 # 0.5.251 (TAGGED 2026-11-20, 2fd2267c): edge v45.1.7 / persist v61.4.2 / verify v22.2.0 — an identity amendment names the link it follows: `emit_identity_amendment(..., prev=None)` writes the identity profile chain position into the signed row (`refs.prev`, rc21 §3; absent on the base link), so an agent can anchor its profile and land corrections on persist v61 (CIRISAgent 2.23.1, Market 4)
 # 0.5.250 (TAGGED 2026-11-20, 0d9fbc8a): edge v45.1.7 / persist v61.4.2 / verify v22.2.0 — VIDEO CALLS ON AN AGENT INSTALL: calls work on a split home (edge acts as the node with the node key; every agent install failed `call.plumbing`), the capsule routes every directory call it stubbed (persist 61.4.2), the first bootstrap peer facilitates direct links on the fold (edge 45.1.7); share a screen, an app or a window in a call (CSD-134); image renditions for chat and drive (display / thumb / thumbhash; GIF, WebP and APNG animate with loop, once or still; a shared photo loses its location); per-call leg metrics over GET /v1/telemetry/otlp/metrics; a star room's key wraps reach every member (CIRISEdge#1014); an identity amendment is the exact text the Wise Authority approved (`amendment_digest`, `amendment_digest_mismatch`); the desktop app can stop the node before a reset (POST /v1/system/local-shutdown, loopback only)
@@ -143,8 +143,8 @@ ciris-lens-core     = { path = "crates/ciris-lens-core" } # ABSORBED in-tree (wo
 # `cirislens_wa_cert` + `cirislens_service_token_revocation` expose the auth
 # substrate the fabric absorbs (CIRISServer#9, src/auth): the agent's `wa_cert`
 # table (users/WA/OAuth/api-keys) + the `revoked_service_tokens` table.
-ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
-ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.8", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
+ciris-persist     = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.3", features = ["sqlite", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-edge        = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.9", features = ["transport-reticulum", "transport-http", "transport-packet-radio", "ffi-uniffi"] }
 # Founder-quorum verification + key-id fingerprint at the composition root
 # (threshold:: module path — NOT re-exported at the crate root).
 # LOCKSTEP: persist v9.4.0 transitively pins verify-core v6.6.x — the whole
@@ -288,7 +288,7 @@ tracing-appender = "0.2"
 # - keyring `tpm` (tss-esapi / TPM 2.0) — the real hardware backend; needs
 #   libtss2 (Linux build dep). Other targets keep the software keystore.
 [target.'cfg(target_os = "linux")'.dependencies]
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.3", features = ["postgres", "scrub", "cirisgraph", "cirislens_wa_cert", "cirislens_service_token_revocation", "cirisaudit", "cirislens_tasks", "cirislens_thoughts", "cirislens_tickets", "cirislens_correlations", "cirislens_deferral_reports", "cirislens_maintenance_locks", "cirislens_creation_ceremonies", "cirislens_legacy_migration", "cirisincident", "telemetry", "secrets"] }
 # keyring `tpm` (TPM-at-rest, Linux-only via tss-esapi). `pkcs11` is no longer
 # per-target — it rides the global `pkcs11` feature now that cryptoki builds on all
 # targets (CIRISVerify v6.12.0).
@@ -317,7 +317,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v22.2.0
 # `full_traces` at Detailed and RELABELS the trace `detailed`, loudly. A mobile
 # node therefore never ships content claiming a scrub it did not receive; it
 # simply cannot offer the NER tier.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2", features = ["scrub-ner"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.3", features = ["scrub-ner"] }
 serialport = "4"
 
 # libsqlite3-sys (pulled by persist's `sqlite` feature) links the SYSTEM libsqlite3
@@ -377,7 +377,7 @@ ciris-crypto  = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v22.2.0
 # and never encodes/decodes). This lets tests/chaos_mesh.rs exercise the SUBSTRATE
 # codec (`fountain_encode`/`fountain_decode`) directly — a real MEASURED proof,
 # not a reference stand-in.
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.8", features = ["codec-fountain"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.9", features = ["codec-fountain"] }
 # Enable persist's TEST-ONLY genesis-seam (`test-genesis-seam`, CIRISPersist#387) for the
 # accord ceremony tests (tests/accord.rs): `Engine::with_signer_pre_genesis` yields a clean
 # engine with the HUMANITY_ACCORD genesis seed SKIPPED, so those tests can stand up their OWN
@@ -389,7 +389,7 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge", tag = "v45.1.8",
 # without one. Pre-genesis is now a supported boot mode, not a test seam, and an Engine built
 # that way reports `GenesisPosture::PreGenesis` while every ROOT_REQUIRING_GATES gate refuses
 # with `NoConstitutionalRootYet`. A node that trusts nothing is not a node that checks nothing.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.2" }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v61.4.3" }
 
 # The QA runner exercises the family/accord ceremony surfaces against a
 # CONTROLLABLE roster — holders it can sign as. persist v31.0.0 made roster growth
