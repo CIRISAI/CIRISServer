@@ -69,6 +69,19 @@ pub const SUMMARY_TARGET: &str = "ciris_server::log_dedup";
 /// message unique even after normalization) cannot grow this map without limit.
 const MAX_TRACKED: usize = 4096;
 
+/// Fields that name the PEER an event is about. A collapsed line carrying one of
+/// them reports how many distinct values it saw (`distinct_peers`), so "link
+/// identified, repeated 400 times" also says whether that was one peer or 400:
+/// the sample alone named one peer and the rest were gone (canonical sizing,
+/// 2026-11-22). The first field present wins; `None` values are not peers.
+const PEER_FIELDS: &[&str] = &["peer", "peer_key_id", "peer_id", "identity_hash"];
+
+/// Distinct peer values remembered per collapsed event per window. Past this the
+/// summary says `distinct_peers_capped = true` and the count is a floor. Bounded
+/// so a storm across every peer of a large mesh costs at most this many hashes
+/// per event (8 bytes each), and only on events that carry a peer field.
+const DISTINCT_CAP: usize = 1024;
+
 /// Collapse identifier-shaped and numeric tokens so that messages differing only
 /// by hash, uuid, or count share one key.
 ///
@@ -139,6 +152,25 @@ struct Entry {
     sample: String,
     target: String,
     level: Level,
+    /// Hashes of the distinct peer-field values seen this window (at most
+    /// [`DISTINCT_CAP`]); empty when the event carries no peer field.
+    peers: std::collections::HashSet<u64>,
+    /// More distinct peers arrived than [`DISTINCT_CAP`] holds.
+    peers_capped: bool,
+}
+
+impl Entry {
+    fn note_peer(&mut self, peer: Option<&str>) {
+        let Some(p) = peer else { return };
+        let mut h = DefaultHasher::new();
+        p.hash(&mut h);
+        let h = h.finish();
+        if self.peers.len() < DISTINCT_CAP {
+            self.peers.insert(h);
+        } else if !self.peers.contains(&h) {
+            self.peers_capped = true;
+        }
+    }
 }
 
 /// Every event this layer has suppressed since start, by `target:LEVEL`.
@@ -183,7 +215,7 @@ impl std::fmt::Debug for DedupState {
 
 impl DedupState {
     /// Record one occurrence; `true` means "let this event print".
-    fn admit(&self, target: &str, level: Level, msg: &str) -> bool {
+    fn admit(&self, target: &str, level: Level, msg: &str, peer: Option<&str>) -> bool {
         // DIAGNOSTIC LINES ARE NEVER COLLAPSED (CIRISServer#632). A line that
         // names its own `diag=` field, or is headed `DIAG#`, exists to state a
         // drop's operands per occurrence — the 22 attribution misses this layer
@@ -212,8 +244,11 @@ impl DedupState {
             sample: msg.to_owned(),
             target: target.to_owned(),
             level,
+            peers: std::collections::HashSet::new(),
+            peers_capped: false,
         });
         e.seen += 1;
+        e.note_peer(peer);
         if e.seen <= BURST {
             true
         } else {
@@ -255,20 +290,33 @@ impl DedupState {
                     target: SUMMARY_TARGET,
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
-                    "event repeated {} times in past {}s ({} suppressed)", e.seen, secs, e.suppressed),
+                    distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
+                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
                 Level::WARN => tracing::warn!(
                     target: SUMMARY_TARGET,
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
-                    "event repeated {} times in past {}s ({} suppressed)", e.seen, secs, e.suppressed),
+                    distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
+                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
                 _ => tracing::info!(
                     target: SUMMARY_TARGET,
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
-                    "event repeated {} times in past {}s ({} suppressed)", e.seen, secs, e.suppressed),
+                    distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
+                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
             }
         }
         drained.len()
+    }
+}
+
+/// `; N distinct peers` for a summary whose event names a peer, else nothing.
+/// `distinct_peers` is 0 exactly when the event carried no peer field.
+fn peers_note(e: &Entry) -> String {
+    match (e.peers.len(), e.peers_capped) {
+        (0, _) => String::new(),
+        (n, false) => format!("; {n} distinct peers"),
+        (n, true) => format!("; at least {n} distinct peers"),
     }
 }
 
@@ -304,6 +352,8 @@ impl DedupLayer {
 struct MessageVisitor {
     message: Option<String>,
     fields: String,
+    /// The first [`PEER_FIELDS`] value present, as rendered (`None` skipped).
+    peer: Option<String>,
 }
 
 impl Visit for MessageVisitor {
@@ -314,14 +364,19 @@ impl Visit for MessageVisitor {
                 self.message = Some(format!("{value:?}"));
             }
         } else {
-            let _ = write!(self.fields, " {}={value:?}", field.name());
+            let rendered = format!("{value:?}");
+            if self.peer.is_none() && PEER_FIELDS.contains(&field.name()) && rendered != "None" {
+                self.peer = Some(rendered.clone());
+            }
+            let _ = write!(self.fields, " {}={rendered}", field.name());
         }
     }
 }
 
 impl MessageVisitor {
-    fn rendered(self) -> Option<String> {
-        self.message.map(|m| m + &self.fields)
+    fn rendered(self) -> Option<(String, Option<String>)> {
+        let peer = self.peer;
+        self.message.map(|m| (m + &self.fields, peer))
     }
 }
 
@@ -354,7 +409,10 @@ impl<S: Subscriber> Layer<S> for DedupLayer {
         let mut v = MessageVisitor::default();
         event.record(&mut v);
         match v.rendered() {
-            Some(msg) => self.state.admit(meta.target(), *meta.level(), &msg),
+            Some((msg, peer)) => {
+                self.state
+                    .admit(meta.target(), *meta.level(), &msg, peer.as_deref())
+            }
             None => true,
         }
     }
@@ -379,6 +437,89 @@ pub fn spawn_flusher(state: DedupState, window: Duration) {
 mod tests {
     use super::*;
 
+    /// The summary events a flush emits, as `(field, value)` maps.
+    #[derive(Clone, Default)]
+    struct Summaries(Arc<Mutex<Vec<HashMap<String, String>>>>);
+    impl<S: Subscriber> Layer<S> for Summaries {
+        fn on_event(&self, e: &Event<'_>, _c: Context<'_, S>) {
+            struct V(HashMap<String, String>);
+            impl Visit for V {
+                fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                    self.0.insert(f.name().to_owned(), format!("{v:?}"));
+                }
+            }
+            if e.metadata().target() == SUMMARY_TARGET {
+                let mut v = V(HashMap::new());
+                e.record(&mut v);
+                self.0.lock().unwrap().push(v.0);
+            }
+        }
+    }
+
+    /// Emit `n` "link identified" lines shaped exactly like the edge-event bus
+    /// logger's (`peer = ?Option<String>`), cycling over `peers` distinct peers,
+    /// flush, and return the one summary.
+    fn link_storm(n: usize, peers: usize) -> HashMap<String, String> {
+        use tracing_subscriber::prelude::*;
+        let (dedup, state) = DedupLayer::new();
+        let got = Summaries::default();
+        let sub = tracing_subscriber::registry().with(dedup).with(got.clone());
+        tracing::subscriber::with_default(sub, || {
+            for i in 0..n {
+                let peer = Some(format!("{:032x}", i % peers));
+                tracing::info!(kind = "LinkEstablished", peer = ?peer, "edge-event: link identified");
+            }
+            state.flush();
+        });
+        let mut all = got.0.lock().unwrap().clone();
+        assert_eq!(all.len(), 1, "one collapsed event, one summary: {all:?}");
+        all.remove(0)
+    }
+
+    #[test]
+    fn a_collapsed_link_line_says_how_many_peers_it_was() {
+        // The canonical-sizing gap (2026-11-22): "link identified" x400 printed
+        // ONE sample peer, so log-derived peer counts were a floor.
+        let s = link_storm(400, 37);
+        assert_eq!(s["total"], "400");
+        assert_eq!(s["distinct_peers"], "37");
+        assert_eq!(s["distinct_peers_capped"], "false");
+        assert!(
+            s["message"].contains("37 distinct peers"),
+            "{}",
+            s["message"]
+        );
+        // One peer repeating is told apart from many.
+        assert_eq!(link_storm(50, 1)["distinct_peers"], "1");
+    }
+
+    #[test]
+    fn distinct_peers_past_the_cap_is_a_floor_and_says_so() {
+        let s = link_storm(DISTINCT_CAP + 200, DISTINCT_CAP + 200);
+        assert_eq!(s["distinct_peers"], DISTINCT_CAP.to_string());
+        assert_eq!(s["distinct_peers_capped"], "true");
+        assert!(s["message"].contains("at least"), "{}", s["message"]);
+    }
+
+    #[test]
+    fn an_event_with_no_peer_field_reports_zero_and_no_note() {
+        use tracing_subscriber::prelude::*;
+        let (dedup, state) = DedupLayer::new();
+        let got = Summaries::default();
+        let sub = tracing_subscriber::registry().with(dedup).with(got.clone());
+        tracing::subscriber::with_default(sub, || {
+            for _ in 0..10 {
+                // `peer = None` is not a peer.
+                let peer: Option<String> = None;
+                tracing::warn!(peer = ?peer, "noisy line");
+            }
+            state.flush();
+        });
+        let s = got.0.lock().unwrap()[0].clone();
+        assert_eq!(s["distinct_peers"], "0");
+        assert!(!s["message"].contains("distinct"), "{}", s["message"]);
+    }
+
     #[test]
     fn suppressed_events_are_counted_cumulatively_by_target_and_level() {
         let s = DedupState::default();
@@ -388,7 +529,7 @@ mod tests {
             .copied()
             .unwrap_or(0);
         for _ in 0..(BURST + 5) {
-            s.admit(target, Level::WARN, "the same storm line");
+            s.admit(target, Level::WARN, "the same storm line", None);
         }
         // Clearing the window must not clear the measurement.
         s.flush();
@@ -527,10 +668,16 @@ mod tests {
         let s = DedupState::default();
         let msg = "delivered envelope REFUSED content_hash=82ca290850de6e12";
         for i in 1..=BURST {
-            assert!(s.admit("t", Level::WARN, msg), "occurrence {i} must print");
+            assert!(
+                s.admit("t", Level::WARN, msg, None),
+                "occurrence {i} must print"
+            );
         }
         for _ in 0..100 {
-            assert!(!s.admit("t", Level::WARN, msg), "repeats must collapse");
+            assert!(
+                !s.admit("t", Level::WARN, msg, None),
+                "repeats must collapse"
+            );
         }
     }
 
@@ -542,7 +689,7 @@ mod tests {
         let mut printed = 0;
         for i in 0..500 {
             let msg = format!("attestation refused (content_hash={i:064x})");
-            if s.admit("edge", Level::WARN, &msg) {
+            if s.admit("edge", Level::WARN, &msg, None) {
                 printed += 1;
             }
         }
@@ -554,10 +701,10 @@ mod tests {
         let s = DedupState::default();
         let msg = "same text";
         for _ in 0..(BURST + 5) {
-            s.admit("edge", Level::WARN, msg);
+            s.admit("edge", Level::WARN, msg, None);
         }
         assert!(
-            s.admit("persist", Level::WARN, msg),
+            s.admit("persist", Level::WARN, msg, None),
             "another target starts its own burst"
         );
     }
@@ -568,7 +715,7 @@ mod tests {
         // stop reporting exactly when a storm made it useful.
         let s = DedupState::default();
         for _ in 0..50 {
-            s.admit("x", Level::WARN, "noise");
+            s.admit("x", Level::WARN, "noise", None);
         }
         assert_eq!(s.flush(), 1, "one collapsed event ⇒ one summary");
         assert_eq!(s.flush(), 0, "window cleared");
@@ -578,7 +725,7 @@ mod tests {
     fn flush_reports_the_full_count_not_just_the_suppressed_half() {
         let s = DedupState::default();
         for _ in 0..10 {
-            s.admit("x", Level::WARN, "noise");
+            s.admit("x", Level::WARN, "noise", None);
         }
         let map = s.0.lock().unwrap();
         let e = map.values().next().unwrap();
@@ -596,7 +743,7 @@ mod tests {
         })
         .join();
         assert!(
-            s.admit("t", Level::WARN, "anything"),
+            s.admit("t", Level::WARN, "anything", None),
             "fail OPEN — a broken dedup must print, not swallow"
         );
     }
@@ -610,6 +757,7 @@ mod tests {
                 "t",
                 Level::WARN,
                 &format!("distinct message number {i} xyz"),
+                None,
             );
         }
         assert!(s.0.lock().unwrap().len() <= MAX_TRACKED);
@@ -639,7 +787,7 @@ mod real_log_measurement {
         let state = DedupState::default();
         let printed = lines
             .iter()
-            .filter(|l| state.admit("real", Level::WARN, l))
+            .filter(|l| state.admit("real", Level::WARN, l, None))
             .count();
 
         println!(
