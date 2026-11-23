@@ -1752,7 +1752,15 @@ struct InviteRequest {
 /// fetching again after its holders were retired. Eric's gate rule: any red,
 /// the limit stays. Lifting it is this one number (the LTS bound is 100, the
 /// mesh edge v45.1.0 serves), with client 0.5.242's decisions reader.
-pub const MAX_ROOM_PEOPLE: usize = 2;
+///
+/// 0.5.254 (Eric, 2026-11-22): SIX. The gate that held it at two was the star
+/// ladder (a real room: only the founder knows each member), red at the third
+/// person on 2026-11-15. Re-run on this tree (edge v45.1.9 / persist v61.4.3,
+/// `ROOM_N=6 ROOM_CONTACTS=star ROOM_LIMIT=none`): 2/2 PASS, seats 5–28 s,
+/// every person reading everything within 78 s, takedown and reversal
+/// everywhere within 33 s. Six is what was proven; a larger limit waits for a
+/// larger star ladder. Client 0.5.242 renders `community.room_full`.
+pub const MAX_ROOM_PEOPLE: usize = 6;
 
 /// Per-room limits a TEST set, by id: `Some(n)` holds that room to `n`
 /// people, `None` lifts the limit. No production path writes here.
