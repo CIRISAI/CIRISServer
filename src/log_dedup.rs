@@ -147,6 +147,10 @@ struct Entry {
     seen: u64,
     suppressed: u64,
     first: Instant,
+    /// When the event LAST occurred. The summary prints at the window's flush,
+    /// so its own timestamp is not when the storm ended: "403 until 01:44:01"
+    /// was a flush time for refusals that had stopped at 01:40:51 (CIRISEdge#1029).
+    last_at: chrono::DateTime<chrono::Utc>,
     /// The first RAW message — a summary that printed only the normalized form
     /// would have scrubbed the very ids an operator needs to go look something up.
     sample: String,
@@ -241,6 +245,7 @@ impl DedupState {
             seen: 0,
             suppressed: 0,
             first: Instant::now(),
+            last_at: chrono::Utc::now(),
             sample: msg.to_owned(),
             target: target.to_owned(),
             level,
@@ -248,6 +253,7 @@ impl DedupState {
             peers_capped: false,
         });
         e.seen += 1;
+        e.last_at = chrono::Utc::now();
         e.note_peer(peer);
         if e.seen <= BURST {
             true
@@ -291,19 +297,22 @@ impl DedupState {
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
                     distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
-                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
+                    last_at = %e.last_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "event repeated {} times in past {}s ({} suppressed{}; last at {})", e.seen, secs, e.suppressed, peers_note(e), e.last_at.format("%H:%M:%S%.3f")),
                 Level::WARN => tracing::warn!(
                     target: SUMMARY_TARGET,
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
                     distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
-                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
+                    last_at = %e.last_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "event repeated {} times in past {}s ({} suppressed{}; last at {})", e.seen, secs, e.suppressed, peers_note(e), e.last_at.format("%H:%M:%S%.3f")),
                 _ => tracing::info!(
                     target: SUMMARY_TARGET,
                     repeated_target = %e.target, total = e.seen, suppressed = e.suppressed,
                     window_secs = secs, sample = %e.sample,
                     distinct_peers = e.peers.len(), distinct_peers_capped = e.peers_capped,
-                    "event repeated {} times in past {}s ({} suppressed{})", e.seen, secs, e.suppressed, peers_note(e)),
+                    last_at = %e.last_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+                    "event repeated {} times in past {}s ({} suppressed{}; last at {})", e.seen, secs, e.suppressed, peers_note(e), e.last_at.format("%H:%M:%S%.3f")),
             }
         }
         drained.len()
@@ -491,6 +500,15 @@ mod tests {
         );
         // One peer repeating is told apart from many.
         assert_eq!(link_storm(50, 1)["distinct_peers"], "1");
+    }
+
+    #[test]
+    fn a_summary_says_when_the_event_last_happened_not_just_when_it_flushed() {
+        let before = chrono::Utc::now();
+        let s = link_storm(20, 2);
+        let last = chrono::DateTime::parse_from_rfc3339(&s["last_at"]).expect("rfc3339 last_at");
+        assert!(last >= before, "{s:?}");
+        assert!(s["message"].contains("last at "), "{}", s["message"]);
     }
 
     #[test]
