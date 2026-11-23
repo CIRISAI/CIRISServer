@@ -1384,9 +1384,16 @@ def av_mesh(mesh: Mesh, args: Any) -> Record:
     lifted. Proves calls scale by member relay, not N-1 uplink (Eric, 2026-11-10).
 
     Env: AV_MEMBERS (4), AV_RATE_HZ (30), AV_FRAME_BYTES (600, clamped to the call's
-    budget), AV_BASE_S (45), AV_CAP_S (90), AV_LIFT_S (60), AV_CAP_KBIT (250: about
-    2.5 copies of one stream on the wire), AV_RELAY (1). One JSONL line per run to
-    evidence/av/av_mesh.jsonl, with the versions."""
+    budget), AV_BASE_S (45), AV_CAP_S (90), AV_LIFT_S (60), AV_CAP_KBIT (250: with
+    framing, ONE copy of a 600 B @ 30 Hz stream, not 2.5 as this note once said),
+    AV_RELAY (1), AV_CAP_MIN_RATIO (0.9). One JSONL line per run to
+    evidence/av/av_mesh.jsonl, with the versions.
+
+    The pass bar, per phase: baseline and lifted, every listener hears >= 99% of
+    the capped publisher. CAPPED, the uplink fits one copy, so the right shape is
+    at most ONE listener fed direct and every other listener fed through a member
+    relay, each hearing >= AV_CAP_MIN_RATIO over the phase (the switch costs a few
+    seconds), and no listener ending the phase with no parent (edge, 2026-11-22)."""
     n_members = int(os.environ.get("AV_MEMBERS", "4"))
     rate = int(os.environ.get("AV_RATE_HZ", "30"))
     size = int(os.environ.get("AV_FRAME_BYTES", "600"))
@@ -1401,6 +1408,20 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
   proves:  baseline {base_s} s → cap the first publisher's uplink to {cap_kbit} kbit/s for {cap_s} s
            (subscribers move to member relays, everyone still hears it) → lift it for {lift_s} s.""")
     os.environ["CIRIS_QA_CALLS"] = "1"
+    # AV_CAP_MIN_RATIO=0 reports the capped ratio without judging it: at 250
+    # kbit one copy (~190-200 kbit framed) has no headroom, so even a correct
+    # mesh may miss 0.9 there (edge, 2026-11-22). Judged in every cell: no link
+    # torn down ChannelExhausted while capped, no gap over AV_CAP_MAX_GAP_S.
+    cap_min = float(os.environ.get("AV_CAP_MIN_RATIO", "0.9"))
+    cap_max_gap = float(os.environ.get("AV_CAP_MAX_GAP_S", "5"))
+    # The ALM's decisions, read as a sequence (who was admitted, shed,
+    # re-parented, why): DEBUG at edge, never collapsed by the dedup layer.
+    rl = mesh.base_env.get("RUST_LOG") or "info"
+    if "edge.alm.decision" not in rl:
+        mesh.base_env["RUST_LOG"] = rl + ",edge.alm.decision=debug,edge.alm.failover=info"
+    # A call room larger than the production people limit (6 from 0.5.254) is
+    # still a room under test here: every node runs with the limit lifted.
+    mesh.base_env["CIRIS_TEST_ROOM_LIMIT"] = os.environ.get("ROOM_LIMIT", "none")
     names = [f"m{i}" for i in range(n_members)]
     nodes = [mesh.add(nm) for nm in names]
     for n in nodes:
@@ -1430,24 +1451,34 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
             (r["proposal_id"] for r in m.must("GET", "/v1/self/invites").get("invites", [])
              if r.get("group_id") == room), None), args.arrive_wait, every=2)
         m.must("POST", f"/v1/self/invites/{pid}/accept", {})
-        if len(seated) >= 2:
-            env = founder.must("POST", f"/v1/communities/{room}/changes/envelope",
-                               {"op": "add", "key_id": m.owner_key_id})
-            sigs = list(env.get("signatures") or [])
-            for o in seated[1:]:
-                sigs.append(o.must("POST", f"/v1/communities/{room}/changes/cosign",
-                                   {"change_envelope": env["change_envelope"]})["signature"])
+        # Every seated member approves on THEIR node through the decisions
+        # queue, as the client does (big_room's flow). The old change-envelope
+        # cosign raced the seat door: the roster moved under the envelope and
+        # the cosign answered community.change_stale (2026-11-22, N=4/8/10).
+        for x in list(seated):
+            def decision(x: Node = x, m: Node = m) -> Optional[Dict[str, Any]]:
+                _, body = x.api("GET", f"/v1/self/decisions?circle={room}")
+                items = (body or {}).get("decisions") or [] if isinstance(body, dict) else []
+                hit = next((d for d in items if d.get("subject") == m.owner_key_id), None)
+                if hit is None:
+                    _, rv = founder.api("GET", f"/v1/communities/{room}")
+                    ms = (rv or {}).get("members") or [] if isinstance(rv, dict) else []
+                    if any(m.owner_key_id in json.dumps(y) for y in ms):
+                        return {"seated": True}
+                return hit
 
-            def assembled() -> Optional[Any]:
-                c, b = founder.api("POST", f"/v1/communities/{room}/changes/assemble",
-                                   {"change_envelope": env["change_envelope"], "signatures": sigs})
-                if c in (200, 201, 202):
-                    return b
-                if isinstance(b, dict) and b.get("reason_id") == "membership.awaiting_acceptance":
-                    return None
-                raise MeshError(f"assemble {m.name} answered {c}: {b}")
-
-            wait_for(f"{m.name} seated by quorum", assembled, args.arrive_wait * 2, every=2)
+            d = wait_for(f"{x.name} to see 'approve {m.name} joining'", decision,
+                         args.arrive_wait * 2, every=1)
+            if d.get("seated"):
+                break
+            if d.get("my_answer") == "approve":
+                continue
+            st, ans = x.api("POST", f"/v1/self/decisions/{d['decision_id']}/answer",
+                            {"answer": "approve"})
+            if st == 200:
+                break
+            if st != 202:
+                raise MeshError(f"{x.name}'s approval of {m.name} answered {st}: {ans}")
 
         def is_seated(m: Node = m) -> Optional[bool]:
             founder.api("GET", f"/v1/communities/{room}/invites")
@@ -1503,6 +1534,22 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                 return int(v.get("frames") or 0)
         return 0
 
+    close_re = re.compile(r"link closed link=\S+ reason=(\w+)")
+
+    def link_closes(n: Node) -> Dict[str, int]:
+        """Link closes by reason, from the node's own log so far (edge prints
+        "link closed … reason=" for every close; ChannelExhausted is the capped
+        uplink's teardown, edge 2026-11-22)."""
+        counts: Dict[str, int] = {}
+        try:
+            for line in Path(n.log_path).read_text(errors="replace").splitlines():
+                m = close_re.search(line)
+                if m:
+                    counts[m.group(1)] = counts.get(m.group(1), 0) + 1
+        except OSError:
+            return {"unreadable": 1}
+        return counts
+
     def snapshot(tag: str) -> Dict[str, Any]:
         out = {}
         for n in nodes:
@@ -1517,28 +1564,61 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                 "streams": c.get("streams"), "alm": c.get("alm"),
                 "chunk_auth": c.get("chunk_auth"), "state": c.get("state"),
                 "tier": c.get("service_tier")}
+            # edge's A/V plane counters (relay in/out per stream, sheds, legs):
+            # recoverable from no log (edge, 2026-11-22).
+            code, m = n.api("GET", "/v1/federation/metrics")
+            out[n.name]["av_plane"] = ((m or {}).get("data") or {}).get("av_plane") \
+                if code == 200 and isinstance(m, dict) else {"unreadable": code}
+            out[n.name]["link_closes"] = link_closes(n)
         step(f"snapshot:{tag}", **out)
         return out
 
+    by_key = {(x.node_key_id or x.key_id): x.name for x in nodes}
+
+    def parent_of(n: Node, s: Dict[str, Any]) -> str:
+        """Who `n` hears the capped publisher THROUGH right now: the publisher
+        itself ("direct"), a relaying member's name, or "none"."""
+        for st in ((s.get("call") or {}).get("streams") or []):
+            pub = st.get("publisher") or ""
+            if pub == capped_key or pub.startswith(capped.key_id):
+                prim = st.get("primary")
+                if not prim:
+                    return "none"
+                if prim == pub:
+                    return "direct"
+                return by_key.get(prim, prim[:16])
+        return "none"
+
     def watch(seconds: float) -> Dict[str, Dict[str, Any]]:
-        """Poll every receiver's count of the capped publisher's frames; the longest
-        stretch with no new frame is that receiver's gap."""
-        last = {n.name: (heard_from(n, capped), time.time()) for n in nodes if n is not capped}
+        """Poll every receiver once a second: its count of the capped publisher's
+        frames (the longest stretch with no new frame is its gap) and who it
+        hears that publisher through. `parents` lists each change as
+        [seconds since the phase began, parent], so a run says "stayed on m0",
+        "moved to a relay at t" or "no parent" (edge, 2026-11-22)."""
+        t_start = time.time()
+        last = {n.name: (heard_from(n, capped), t_start) for n in nodes if n is not capped}
         gaps = {k: 0.0 for k in last}
-        end = time.time() + seconds
+        parents: Dict[str, List[Any]] = {k: [] for k in last}
+        end = t_start + seconds
         while time.time() < end:
             time.sleep(1)
             now = time.time()
             for n in nodes:
                 if n is capped:
                     continue
-                cnt = heard_from(n, capped)
+                s = stats(n)
+                bp = (s.get("received") or {}).get("by_publisher") or {}
+                cnt = next((int(v.get("frames") or 0) for k, v in bp.items()
+                            if k == capped_key or k.startswith(capped.key_id)), 0)
                 prev_cnt, prev_t = last[n.name]
                 if cnt > prev_cnt:
                     last[n.name] = (cnt, now)
                 else:
                     gaps[n.name] = max(gaps[n.name], now - prev_t)
-        return {k: {"max_gap_s": round(v, 1)} for k, v in gaps.items()}
+                par = parent_of(n, s)
+                if not parents[n.name] or parents[n.name][-1][1] != par:
+                    parents[n.name].append([round(now - t_start, 1), par])
+        return {k: {"max_gap_s": round(v, 1), "parents": parents[k]} for k, v in gaps.items()}
 
     def ratios(before: Dict[str, Any], after: Dict[str, Any], seconds: float) -> Dict[str, Any]:
         r = {}
@@ -1594,7 +1674,24 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                    for n in nodes if n is not capped}
     alm = {n.name: (s3.get(n.name) or {}).get("alm") for n in nodes}
     auth = {n.name: (s3.get(n.name) or {}).get("chunk_auth") for n in nodes}
-    failures = [f"{ph}:{k}" for ph, rs in phases.items() for k, v in rs.items() if v["ratio"] < 0.99]
+    failures = [f"{ph}:{k}" for ph, rs in phases.items() if ph != "capped"
+                for k, v in rs.items() if v["ratio"] < 0.99]
+    if "capped" in phases:
+        if cap_min > 0:
+            failures += [f"capped:{k}:ratio" for k, v in phases["capped"].items() if v["ratio"] < cap_min]
+        ends = {k: (g.get("parents") or [[0, "none"]])[-1][1] for k, g in gaps_cap.items()}
+        direct = [k for k, p in ends.items() if p == "direct"]
+        if len(direct) > 1:
+            failures.append(f"capped:fed_direct_by_a_one_copy_uplink:{','.join(sorted(direct))}")
+        failures += [f"capped:{k}:no_parent" for k, p in ends.items() if p == "none"]
+        failures += [f"capped:{k}:gap_{g['max_gap_s']}s" for k, g in gaps_cap.items()
+                     if g.get("max_gap_s", 0) > cap_max_gap]
+        for name in [x.name for x in nodes]:
+            before = (s1.get(name) or {}).get("link_closes") or {}
+            after = (s2.get(name) or {}).get("link_closes") or {}
+            torn = after.get("ChannelExhausted", 0) - before.get("ChannelExhausted", 0)
+            if torn > 0:
+                failures.append(f"capped:{name}:links_torn_down_ChannelExhausted:{torn}")
     verdict = "PASS" if not failures else "FAIL"
     record = {"scenario": "av_mesh", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "versions": _versions(), "docker": bool(mesh.docker), "members": n_members,
@@ -1607,7 +1704,7 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
     step("evidence", path=path)
     rec: Record = {"steps": step.log, "verdict": verdict, "evidence": path}
     if failures:
-        step.fail("phases", "the capped publisher was heard under 99% in a phase: " + ", ".join(failures),
+        step.fail("phases", "the capped publisher was not heard as each phase requires: " + ", ".join(failures),
                   nodes, r"alm|shed|relay|offer|call")
         rec["first_failure"] = step.first_failure
     return rec

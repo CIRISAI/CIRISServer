@@ -563,6 +563,29 @@ codegen-units = 16
 [profile.dev]
 debug = "line-tables-only"
 
+# Crypto at full optimisation even in a debug build (edge's own dev profile does
+# the same; a dependency's profile override does not apply in this workspace).
+# Unoptimised Ed25519 `verify_strict` costs ~4.8 ms a chunk, capping a debug
+# receiver near 200 chunks/s, and a relayed chunk is verified at the relay AND
+# the receiver: the debug av_mesh matrix measured the crypto, not the relay
+# (2026-11-22). ML-DSA, ML-KEM, X25519 and the AEADs ride the same hot paths.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+[profile.dev.package.x25519-dalek]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.ml-dsa]
+opt-level = 3
+[profile.dev.package.ml-kem]
+opt-level = 3
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+
 [profile.test]
 debug = "line-tables-only"
 
