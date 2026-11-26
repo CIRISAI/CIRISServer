@@ -17,6 +17,8 @@
 //! - `POST /v1/qa/call/stream {room, rate_hz, frame_bytes, seconds}` publishes.
 //! - `GET  /v1/qa/call/stats?room=` reads the call's counters.
 //! - `POST /v1/qa/call/stop   {room}` leaves and returns the final counters.
+//! - `GET  /v1/qa/room/epoch?room=` this node's room group: epoch and members,
+//!   from the one live handle chat and calls share (`mls_state::groups_for`).
 //!
 //! Not a UI surface: errors carry a program token and edge's error text, no
 //! localized message ids.
@@ -42,13 +44,19 @@ use crate::auth::session::resolve_bearer;
 /// The env switch that mounts the routes.
 pub const ENV_QA_CALLS: &str = "CIRIS_QA_CALLS";
 /// Longest stream one request may run.
-const MAX_STREAM_SECS: u64 = 300;
+const MAX_STREAM_SECS: u64 = 900;
 /// Highest frame rate one request may ask for.
 const MAX_RATE_HZ: u32 = 120;
 /// The frame header: seq (8) + sender's unix ms (8).
 const HEADER: usize = 16;
 /// Delay samples kept per call.
 const MAX_SAMPLES: usize = 8192;
+
+/// Upper edges (ms) of the per-publisher delay histogram: how late each frame
+/// reached this node's app, counted for EVERY frame (the samples above stop at
+/// MAX_SAMPLES). Cumulative, so a harness diffs two reads for a window. The
+/// last bucket is everything later.
+const DELAY_EDGES_MS: [u64; 8] = [100, 250, 500, 1000, 2000, 5000, 10_000, u64::MAX];
 /// Events kept per call.
 const MAX_EVENTS: usize = 64;
 
@@ -64,10 +72,16 @@ struct QaState {
     edge: Arc<Edge>,
 }
 
+/// One publisher as heard here: frames, delay samples, and the delay histogram
+/// over [`DELAY_EDGES_MS`].
+type Heard = (u64, Vec<u64>, [u64; 8]);
+
 #[derive(Default)]
 struct Counters {
     frames_sent: AtomicU64,
     publish_refused: AtomicU64,
+    /// Frames sent smaller than asked, to fit the call's current budget.
+    frames_shrunk: AtomicU64,
     leg_delivered: AtomicU64,
     leg_congested: AtomicU64,
     leg_too_large: AtomicU64,
@@ -84,7 +98,7 @@ struct Slot {
     delays_ms: StdMutex<Vec<u64>>,
     /// Per publisher: frames heard and their delays (the 0.5.246 room test reads
     /// each stream on its own, not one sum across the room).
-    by_publisher: StdMutex<std::collections::BTreeMap<String, (u64, Vec<u64>)>>,
+    by_publisher: StdMutex<std::collections::BTreeMap<String, Heard>>,
     events: StdMutex<Vec<String>>,
     last_publish_error: StdMutex<Option<String>>,
     started: Instant,
@@ -244,6 +258,8 @@ async fn start(
                     if entry.1.len() < MAX_SAMPLES {
                         entry.1.push(delay);
                     }
+                    let b = DELAY_EDGES_MS.iter().position(|e| delay <= *e).unwrap_or(7);
+                    entry.2[b] += 1;
                 }
             }
         });
@@ -332,11 +348,21 @@ async fn stream(
         // standing ticker.
         for i in 0..total {
             tokio::time::sleep_until(t0 + period * u32::try_from(i).unwrap_or(u32::MAX)).await;
-            let mut bytes = vec![0u8; size];
-            bytes[..8].copy_from_slice(&i.to_be_bytes());
-            bytes[8..16].copy_from_slice(&now_ms().to_be_bytes());
             let mut guard = s.call.lock().await;
             let Some(call) = guard.as_mut() else { break };
+            // A real client re-reads `frame_budget_bytes` from `ready` whenever a
+            // leg changes it; a fixed size would be refused once a 400-byte
+            // relayed leg joins the call (its budget is the least of all legs).
+            let want = call
+                .chunk_plaintext_budget()
+                .map_or(size, |b| b.min(size))
+                .max(HEADER);
+            if want < size {
+                s.counters.frames_shrunk.fetch_add(1, Ordering::Relaxed);
+            }
+            let mut bytes = vec![0u8; want];
+            bytes[..8].copy_from_slice(&i.to_be_bytes());
+            bytes[8..16].copy_from_slice(&now_ms().to_be_bytes());
             match call.publish(Frame::opaque(bytes)).await {
                 Ok(report) => {
                     s.counters.frames_sent.fetch_add(1, Ordering::Relaxed);
@@ -391,7 +417,7 @@ fn by_publisher_json(slot: &Slot) -> serde_json::Value {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut out = serde_json::Map::new();
-    for (publisher, (frames, delays)) in by.iter() {
+    for (publisher, (frames, delays, hist)) in by.iter() {
         let mut d = delays.clone();
         d.sort_unstable();
         out.insert(
@@ -400,6 +426,12 @@ fn by_publisher_json(slot: &Slot) -> serde_json::Value {
                 "frames": frames,
                 "delay_ms_p50": percentile(&d, 0.5),
                 "delay_ms_p95": percentile(&d, 0.95),
+                // Cumulative count of frames at most each edge late (the last:
+                // later than 10 s), every frame counted.
+                "delay_hist": {
+                    "edges_ms": [100, 250, 500, 1000, 2000, 5000, 10_000, null],
+                    "counts": hist,
+                },
             }),
         );
     }
@@ -476,6 +508,7 @@ async fn stats_of(slot: &Slot) -> serde_json::Value {
         "sent": {
             "frames": c.frames_sent.load(Ordering::Relaxed),
             "publish_refused": c.publish_refused.load(Ordering::Relaxed),
+            "frames_shrunk": c.frames_shrunk.load(Ordering::Relaxed),
             "last_publish_error": slot.last_publish_error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
             "legs": {
                 "delivered": c.leg_delivered.load(Ordering::Relaxed),
@@ -518,6 +551,33 @@ async fn stats(
     let mut v = stats_of(&slot).await;
     v["room"] = serde_json::json!(q.room);
     Json(v).into_response()
+}
+
+/// This node's live room group for `room`: `{room, epoch, members}`, or 404
+/// `no_group` while it holds none. A harness waits on every node reporting the
+/// same epoch before it starts a call (edge 2026-11-25: a call joined before a
+/// node applied the last Add commit stayed on the old epoch).
+async fn room_epoch(
+    State(st): State<QaState>,
+    headers: HeaderMap,
+    Query(q): Query<RoomQuery>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let Some(node) = crate::node_key::wire_identity() else {
+        return fail(StatusCode::SERVICE_UNAVAILABLE, "no_node_key", &q.room);
+    };
+    match crate::mls_state::load_shared(node, &q.room).await {
+        Ok(Some(g)) => Json(serde_json::json!({
+            "room": q.room,
+            "epoch": g.epoch().await,
+            "members": g.member_key_ids().await,
+        }))
+        .into_response(),
+        Ok(None) => fail(StatusCode::NOT_FOUND, "no_group", &q.room),
+        Err(e) => fail(StatusCode::SERVICE_UNAVAILABLE, "group_unavailable", e),
+    }
 }
 
 async fn stop(State(st): State<QaState>, headers: HeaderMap, Json(b): Json<RoomQuery>) -> Response {
@@ -688,6 +748,7 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
         .route("/v1/qa/call/stream", axum::routing::post(stream))
         .route("/v1/qa/call/stats", axum::routing::get(stats))
         .route("/v1/qa/call/stop", axum::routing::post(stop))
+        .route("/v1/qa/room/epoch", axum::routing::get(room_epoch))
         .route("/v1/qa/call/echo", axum::routing::post(echo_start))
         .route("/v1/qa/call/echo/stop", axum::routing::post(echo_stop))
         .with_state(QaState { engine, edge })

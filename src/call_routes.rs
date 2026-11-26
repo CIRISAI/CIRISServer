@@ -5,10 +5,14 @@
 //! the harness door; these join AS THE PERSON, carry the client's own encoded
 //! frames, and refuse in words.
 //!
-//! - `POST /v1/chat/{room}/call` `{video?, relay?}`: join. `relay` defaults to
-//!   **false** in 0.5.246: member relays shed and strand listeners on edge
-//!   v44/v45 (evidence/av/av_mesh.jsonl), so calls run full mesh, which edge
-//!   keeps for up to 9 members by design, until edge 45.1 passes the relay gate.
+//! - `POST /v1/chat/{room}/call` `{video?, relay?}`: join. `relay` omitted is
+//!   the node's choice ([`relay_default`]): never on a serve seat (edge refuses
+//!   to relay call media there anyway), never on a phone build, and **on** for
+//!   any other member node ([`RELAY_DEFAULT_MEMBER`]; the av_mesh relay matrix on
+//!   edge 45.2.0 is its release gate, evidence/av/av_mesh.jsonl). A client on a
+//!   metered network sends `relay: false`; on an unmetered phone, `relay: true`.
+//! - `POST /v1/chat/{room}/call/relay` `{relay}`: start or stop relaying others'
+//!   streams live (edge `Call::set_relay`); answers the relay status.
 //! - `DELETE /v1/chat/{room}/call`: leave. The call goes on for the others.
 //! - `GET /v1/chat/{room}/call`: is there a call, who is in it, and the two
 //!   things a joiner is told before publishing (`room_may_keep`,
@@ -35,8 +39,11 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use ciris_edge::transport::av_call::{Call, CallError, CallEvent, CallOptions, Frame};
+use ciris_edge::transport::av_call::{
+    Call, CallError, CallEvent, CallOptions, CallState as EdgeCallState, EndCause, Frame,
+};
 use ciris_edge::transport::av_chunk_auth::SignedEnd;
+use ciris_edge::transport::media_path::PathKind;
 use ciris_edge::transport::realtime_av::{ChunkLayer, ReceiverLayerPolicy, StreamId};
 use ciris_edge::Edge;
 use ciris_persist::prelude::Engine;
@@ -58,14 +65,118 @@ struct CallState {
     edge: Arc<Edge>,
 }
 
-/// One joined call on this node: the call itself, its two take-once streams
-/// (taken by the frames socket), and the receive caps the layers route set.
+/// What a call event is a state OF: two events with one key are two states of
+/// the same thing, and only the later one is worth telling a client that has
+/// not read the first. Streams are keyed by STREAM, not member: a member has a
+/// camera stream and a screen share, and losing the share's end would leave it
+/// on screen. `None`: a one-off notice, kept in order.
+fn event_key(e: &CallEvent) -> Option<(u8, String, [u8; 32])> {
+    const NO: [u8; 32] = [0; 32];
+    match e {
+        CallEvent::RelayStatus { .. } => Some((1, String::new(), NO)),
+        CallEvent::LoadTier { .. } => Some((2, String::new(), NO)),
+        CallEvent::MediaPathFailed { member, .. } | CallEvent::MediaPathRestored { member, .. } => {
+            Some((3, member.clone(), NO))
+        }
+        CallEvent::StreamAdded {
+            publisher, stream, ..
+        }
+        | CallEvent::StreamEnded {
+            publisher, stream, ..
+        } => Some((4, publisher.clone(), stream.0)),
+        CallEvent::VideoUnavailable { publisher, .. } | CallEvent::VideoRestored { publisher } => {
+            Some((5, publisher.clone(), NO))
+        }
+        CallEvent::AttendeeJoined { key_id } | CallEvent::AttendeeLeft { key_id, .. } => {
+            Some((6, key_id.clone(), NO))
+        }
+        CallEvent::MemberJoined { key_id } | CallEvent::MemberLeft { key_id } => {
+            Some((7, key_id.clone(), NO))
+        }
+        _ => None,
+    }
+}
+
+/// The most one-off notices kept for a client that is not reading.
+const MAX_WAITING_NOTICES: usize = 256;
+
+/// The call's events, read from edge from the moment of the join by a task that
+/// never waits on the client. Edge's channel holds 64 and DROPS what does not
+/// fit (edge 2026-11-25), and the frames socket's writer waits on a slow or
+/// backgrounded client, and nothing read at all before a socket opened, so a
+/// `StreamEnded` could be lost after its `StreamAdded` was shown.
+#[derive(Default)]
+struct EventBox {
+    waiting: StdMutex<std::collections::VecDeque<CallEvent>>,
+    arrived: tokio::sync::Notify,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl EventBox {
+    /// Start reading `events` into a new box.
+    fn read(mut events: tokio::sync::mpsc::Receiver<CallEvent>) -> Arc<Self> {
+        let b = Arc::new(Self::default());
+        let me = Arc::clone(&b);
+        tokio::spawn(async move {
+            while let Some(e) = events.recv().await {
+                me.put(e);
+            }
+            me.closed.store(true, std::sync::atomic::Ordering::Release);
+            me.arrived.notify_one();
+        });
+        b
+    }
+
+    fn put(&self, e: CallEvent) {
+        let key = event_key(&e);
+        let mut q = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match key {
+            Some(_) => q.retain(|w| event_key(w) != key),
+            None => {
+                if q.iter().filter(|w| event_key(w).is_none()).count() >= MAX_WAITING_NOTICES {
+                    if let Some(i) = q.iter().position(|w| event_key(w).is_none()) {
+                        q.remove(i);
+                    }
+                }
+            }
+        }
+        q.push_back(e);
+        drop(q);
+        self.arrived.notify_one();
+    }
+
+    /// The next event; `None` once the call's events have ended and all are read.
+    async fn next(&self) -> Option<CallEvent> {
+        loop {
+            let closed = self.closed.load(std::sync::atomic::Ordering::Acquire);
+            let e = self
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front();
+            if e.is_some() {
+                return e;
+            }
+            if closed {
+                return None;
+            }
+            self.arrived.notified().await;
+        }
+    }
+}
+
+/// One joined call on this node: the call itself, its frames and its events
+/// (each taken once, by the frames socket), and the receive caps the layers
+/// route set.
 struct Joined {
     call: tokio::sync::Mutex<Option<Call>>,
     frames: StdMutex<
         Option<tokio::sync::mpsc::Receiver<ciris_edge::transport::av_call::ReceivedFrame>>,
     >,
-    events: StdMutex<Option<tokio::sync::mpsc::Receiver<CallEvent>>>,
+    events: StdMutex<Option<Arc<EventBox>>>,
     caps: StdMutex<HashMap<String, ReceiverLayerPolicy>>,
     video: bool,
     /// Whether video and screen share may be published now: the call has at
@@ -74,6 +185,9 @@ struct Joined {
     /// This device's live screen or window share, a second own stream
     /// (`Call::add_stream`), while one is up.
     share: StdMutex<Option<StreamId>>,
+    /// Non-zero once [`hold_to_call_size`] found the call too big: the people
+    /// it counted.
+    full: std::sync::atomic::AtomicUsize,
 }
 
 /// **Video only between two people, on edge v45.0.0** (Eric, 2026-11-10: "Yes
@@ -107,6 +221,71 @@ async fn people_in_call(engine: &Engine, call: &Call) -> usize {
 #[must_use]
 pub const fn video_allowed(people: usize) -> bool {
     people <= VIDEO_MAX_PEOPLE
+}
+
+/// **A call holds at most four people on edge 45.2.0** (Eric 2026-11-25:
+/// "limit it to 4 and tag"). The av_mesh matrix on edge 45.2.0 met every bar
+/// at four members (250 and 300 kbit/s) and failed at six: under a capped
+/// uplink six members heard 0.69-0.82 of the capped publisher and links were
+/// torn down, and one six-member call never formed (evidence/av/av_mesh.jsonl;
+/// edge's 45.2.1 work list). A room still seats six: the limit is on who is IN
+/// THE CALL, counted in people like [`VIDEO_MAX_PEOPLE`] (one person's phone
+/// and laptop are one).
+pub const CALL_MAX_PEOPLE: usize = 4;
+
+/// Whether a call of `people` (this device's person included) is within
+/// [`CALL_MAX_PEOPLE`].
+#[must_use]
+pub const fn call_has_room(people: usize) -> bool {
+    people <= CALL_MAX_PEOPLE
+}
+
+/// How long after its own join a node checks that it did not make the call too
+/// big. Attendance is learned from legs and stream bindings as they arrive, so
+/// a joiner cannot know the count at the moment it joins; within this window a
+/// node that finds more than [`CALL_MAX_PEOPLE`] people leaves, and the
+/// members who were there first never do. Two people joining the same full
+/// call in the same seconds may both be turned away; joining again works.
+pub const CALL_FULL_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The `call_ended` a node sends before it leaves a call it made too big.
+#[must_use]
+pub fn call_full_json(people: usize) -> serde_json::Value {
+    json!({ "type": "call_ended", "ended": "call_full", "reason_id": "call.full",
+            "max_people": CALL_MAX_PEOPLE, "people": people })
+}
+
+/// Watch a call this node just joined for [`CALL_FULL_WINDOW`]: if it holds
+/// more than [`CALL_MAX_PEOPLE`] people, tell the socket (it sends
+/// [`call_full_json`] and closes) and leave.
+async fn hold_to_call_size(engine: Arc<Engine>, room: String, mine: Arc<Joined>) {
+    let until = tokio::time::Instant::now() + CALL_FULL_WINDOW;
+    while tokio::time::Instant::now() < until {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        match current(&room) {
+            Some(j) if Arc::ptr_eq(&j, &mine) => {}
+            _ => return,
+        }
+        let people = {
+            let g = mine.call.lock().await;
+            match g.as_ref() {
+                Some(c) => people_in_call(&engine, c).await,
+                None => return,
+            }
+        };
+        if !call_has_room(people) {
+            mine.full
+                .store(people, std::sync::atomic::Ordering::Release);
+            tracing::info!(room = %room, people, max = CALL_MAX_PEOPLE,
+                "call: full; this device joined last and leaves");
+            // Give the socket's watch a tick to say why before the call goes.
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            if matches!(current(&room), Some(j) if Arc::ptr_eq(&j, &mine)) {
+                let _ = leave_room(&room, "left").await;
+            }
+            return;
+        }
+    }
 }
 
 /// Single-use frames-socket tickets: a browser cannot put a bearer header on a
@@ -214,6 +393,13 @@ async fn with_person(engine: &Engine, mut v: serde_json::Value) -> serde_json::V
         let p = person_of(engine, &m).await;
         v["person"] = json!(p);
     }
+    if let Some(t) = v
+        .get("through")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        v["through_person"] = json!(person_of(engine, &t).await);
+    }
     v
 }
 
@@ -294,7 +480,15 @@ fn refuse_call(e: &CallError) -> Response {
             StatusCode::FORBIDDEN,
             "call.anonymous_mode",
             "Calls aren't available while this device is anonymous.",
-            detail,
+            json!({ "detail": e.to_string(), "token": "onion_anonymous_no_media" }),
+        ),
+        // Edge 45.2.0: calls ride unshaped links, so a device set to shaped
+        // links only starts, joins and accepts no call. Direct links stay.
+        CallError::ShapedOnly => refuse_with(
+            StatusCode::FORBIDDEN,
+            "call.shaped_only",
+            "Calls aren't available while this device is set to \"Always hide when I talk\".",
+            json!({ "detail": e.to_string(), "token": "shaped_only_no_media" }),
         ),
         CallError::FrameTooLarge { .. } => refuse_with(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -321,9 +515,73 @@ fn refuse_call(e: &CallError) -> Response {
 struct JoinBody {
     #[serde(default)]
     video: bool,
-    /// Off by default in 0.5.246 (see the module note).
+    /// Omitted: the node decides ([`relay_default`]). A client on a metered
+    /// network sends `false` unless the person opted in; a phone must say
+    /// `true` to relay.
     #[serde(default)]
-    relay: bool,
+    relay: Option<bool>,
+}
+
+/// The codecs a video stream (a camera, or a share) is bound to: AV1 under
+/// 0x01, H.264 under 0x04 and Opus under 0xFF, the ids every client handles
+/// (tests/vectors/call_frames_v1.json). A map naming a video class makes edge
+/// FRAME the stream: a frame over the chunk budget is split into marked
+/// fragments and rejoined at each receiver. With no map (0.5.246-0.5.253) a
+/// video frame had to fit one chunk, a few hundred bytes, so a real camera's
+/// frames were refused `over_budget`.
+fn video_codecs() -> Option<ciris_edge::transport::av_chunk_auth::CodecMap> {
+    use ciris_edge::transport::av_chunk_auth::{CodecMap, CodecToken};
+    CodecMap::new([CodecToken::Av1, CodecToken::H264, CodecToken::Opus]).ok()
+}
+
+/// Whether a member node relays others' call streams when its client did not
+/// say (Eric 2026-11-22: on by default, phones on mobile or metered data opt
+/// in). The release gate for `true` is the av_mesh relay matrix (N=4/6 x
+/// 250/300 kbit) on edge 45.2.0; flipping it changes no wire shape.
+pub const RELAY_DEFAULT_MEMBER: bool = true;
+
+/// A phone build. It cannot tell here whether its network is metered, so a
+/// client that says nothing (every client before the `relay` field) is taken
+/// as not opted in: the client sends `relay: true` on an unmetered network.
+pub const PHONE: bool = cfg!(any(target_os = "android", target_os = "ios"));
+
+/// The relay choice for a join with no `relay`: never on a serve seat (edge
+/// 45.2.0 refuses to relay call media there whatever it is told), never on a
+/// phone that did not say.
+pub const fn relay_default(serve_seat: bool, phone: bool) -> bool {
+    !serve_seat && !phone && RELAY_DEFAULT_MEMBER
+}
+
+/// Whether this node is a serve seat (a canonical): it takes no call media.
+/// Unknown counts as one, so a node that cannot tell never offers to relay.
+async fn is_serve_seat(engine: &Engine) -> bool {
+    match crate::node_key::wire_identity() {
+        Some(me) => engine.is_canonical(me).await.unwrap_or(true),
+        None => true,
+    }
+}
+
+/// The distinct people `children` belong to; an unbound node is its own.
+async fn people_count(engine: &Engine, children: &[String]) -> usize {
+    let mut people = std::collections::HashSet::new();
+    for c in children {
+        people.insert(person_of(engine, c).await.unwrap_or_else(|| c.clone()));
+    }
+    people.len()
+}
+
+/// The relay status a client shows ("relaying for N people"): `relaying_for`
+/// counts PEOPLE, mapped from edge's child nodes; `relaying_for_nodes` is
+/// edge's own count.
+async fn relay_view(engine: &Engine, call: &Call, serve_seat: bool) -> serde_json::Value {
+    let (relaying, nodes) = call.relay_status();
+    let children: Vec<String> = call.relayed_to().into_iter().map(|r| r.child).collect();
+    json!({
+        "relaying": relaying,
+        "relaying_for": people_count(engine, &children).await,
+        "relaying_for_nodes": nodes,
+        "serve_seat": serve_seat,
+    })
 }
 
 async fn join(
@@ -360,8 +618,15 @@ async fn join(
             )
         }
     };
+    let serve_seat = is_serve_seat(&st.engine).await;
+    let relay = !serve_seat
+        && body
+            .relay
+            .unwrap_or_else(|| relay_default(serve_seat, PHONE));
     let opts = CallOptions {
-        relay: body.relay,
+        relay,
+        // Audio-only stays unframed (one Opus packet per chunk).
+        codecs: if body.video { video_codecs() } else { None },
         ..CallOptions::default()
     };
     let mut call = match st.edge.join_call_as(&room, opts, actor).await {
@@ -369,8 +634,18 @@ async fn join(
         Err(e) => return refuse_call(&e),
     };
     let frames = call.frames();
-    let events = call.events();
-    let video_ok = video_allowed(people_in_call(&st.engine, &call).await);
+    let events = call.events().map(EventBox::read);
+    let people_now = people_in_call(&st.engine, &call).await;
+    if !call_has_room(people_now) {
+        let _ = call.leave_with(SignedEnd::Left).await;
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.full",
+            "This call already has 4 people, the most a call can have.",
+            json!({ "max_people": CALL_MAX_PEOPLE, "people": people_now - 1 }),
+        );
+    }
+    let video_ok = video_allowed(people_now);
     let view = join_view(&st.engine, &room, &call, body.video, false).await;
     joined()
         .lock()
@@ -385,9 +660,17 @@ async fn join(
                 video: body.video,
                 video_ok: std::sync::atomic::AtomicBool::new(video_ok),
                 share: StdMutex::new(None),
+                full: std::sync::atomic::AtomicUsize::new(0),
             }),
         );
-    tracing::info!(room = %room, relay = body.relay, video = body.video, "call: joined as the member");
+    if let Some(mine) = current(&room) {
+        tokio::spawn(hold_to_call_size(
+            Arc::clone(&st.engine),
+            room.clone(),
+            mine,
+        ));
+    }
+    tracing::info!(room = %room, relay, serve_seat, video = body.video, "call: joined as the member");
     (StatusCode::OK, Json(view)).into_response()
 }
 
@@ -416,6 +699,7 @@ async fn join_view(
         "attendees": attendees,
         "attendee_people": people,
         "legs": call.legs(),
+        "relay": relay_view(engine, call, is_serve_seat(engine).await).await,
         "frames_socket": format!("/v1/chat/{room}/call/frames"),
         // Browsers: open the socket with `?ticket=<this>` (single use, 30 s).
         "frames_ticket": issue_ticket(room),
@@ -556,6 +840,7 @@ async fn state(
                     "service_tier": format!("{:?}", c.service_tier()),
                     "attendees": c.attendees().await,
                     "legs": c.legs(),
+                    "relay": relay_view(&st.engine, c, is_serve_seat(&st.engine).await).await,
                     "video": j.video,
                 })),
                 None => None,
@@ -615,6 +900,47 @@ async fn state(
         })),
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+struct RelayBody {
+    relay: bool,
+}
+
+/// `POST /v1/chat/{room}/call/relay` `{relay}`: relay others' streams or stop,
+/// live. A serve seat stays off (edge's rule) and says `serve_seat: true`.
+async fn set_relay(
+    State(st): State<CallState>,
+    headers: HeaderMap,
+    Path(room): Path<String>,
+    Json(body): Json<RelayBody>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let Some(j) = current(&room) else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.not_joined",
+            "Join the call first.",
+            json!({}),
+        );
+    };
+    let g = j.call.lock().await;
+    let Some(c) = g.as_ref() else {
+        return refuse_with(
+            StatusCode::CONFLICT,
+            "call.not_joined",
+            "Join the call first.",
+            json!({}),
+        );
+    };
+    let serve_seat = is_serve_seat(&st.engine).await;
+    c.set_relay(body.relay && !serve_seat).await;
+    tracing::info!(room = %room, relay = body.relay, serve_seat, "call: relay set");
+    let mut v = relay_view(&st.engine, c, serve_seat).await;
+    v["room"] = json!(room);
+    (StatusCode::OK, Json(v)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -764,8 +1090,88 @@ fn event_json(e: &CallEvent) -> serde_json::Value {
         CallEvent::Stranded { epoch, reason } => {
             json!({ "type": "stranded", "epoch": epoch, "reason": reason })
         }
+        // Edge 45.2.0 (docs/calls_relay_tokens.md): `relaying_for` is edge's
+        // NODE count here; the socket replaces it with people (`relay_view`).
+        CallEvent::RelayStatus {
+            relaying,
+            relaying_for,
+        } => json!({
+            "type": "relay_status",
+            "relaying": relaying,
+            "relaying_for": relaying_for,
+            "relaying_for_nodes": relaying_for,
+            "serve_seat": false,
+        }),
+        // `through` is a node key id (the attendee `member` id space);
+        // `through_person` is filled by `with_person`.
+        CallEvent::MediaPathRestored {
+            member,
+            via,
+            through,
+        } => json!({
+            "type": "media_path_restored",
+            "member": member,
+            "via": via.token(),
+            "direct": *via != PathKind::PeerRelay,
+            "through": through,
+            "through_person": serde_json::Value::Null,
+        }),
+        // The person sees the real reason (Eric 2026-11-21): `cause` and
+        // `relay` pass through verbatim, each with its copy key; the rest is
+        // the "?" panel's, in edge's serde form.
+        CallEvent::MediaPathFailed {
+            member,
+            cause,
+            retryable,
+            retry_after_s,
+            detail,
+            tried,
+            local_nat,
+            peer_nat,
+            relay,
+        } => json!({
+            "type": "media_path_failed",
+            "member": member,
+            "cause": cause.token(),
+            "reason_id": format!("call.media_path_failed.{}", cause.token()),
+            "retryable": retryable,
+            "retry_after_s": retry_after_s,
+            "relay": relay.token(),
+            "relay_reason_id": format!("call.relay_standing.{}", relay.token()),
+            "diag": {
+                "detail": detail.map(|d| d.token()),
+                "tried": tried,
+                "local_nat": local_nat,
+                "peer_nat": peer_nat,
+            },
+        }),
         other => json!({ "type": "event", "detail": format!("{other:?}") }),
     }
+}
+
+/// The token and copy key of a call's end (edge `EndCause`). A media refusal
+/// mid-call keeps the join refusal's copy (edge: "the same copy as the
+/// refusal"); `call.ended` is the CONFLICT string, so ends are `call.end.*`.
+pub fn end_ids(cause: &EndCause) -> (&'static str, &'static str) {
+    match cause {
+        EndCause::HungUp => ("hung_up", "call.end.hung_up"),
+        EndCause::Revoked => ("revoked", "call.end.revoked"),
+        EndCause::Expired => ("expired", "call.end.expired"),
+        EndCause::MediaRefused { token } => (
+            token,
+            if *token == "shaped_only_no_media" {
+                "call.shaped_only"
+            } else {
+                "call.anonymous_mode"
+            },
+        ),
+    }
+}
+
+/// The `call_ended` socket event.
+pub fn ended_json(cause: &EndCause) -> serde_json::Value {
+    let (token, id) = end_ids(cause);
+    json!({ "type": "call_ended", "ended": token, "reason_id": id })
 }
 
 #[derive(Deserialize, Default)]
@@ -831,7 +1237,7 @@ async fn pump(
     room: String,
     j: Arc<Joined>,
     mut frames: tokio::sync::mpsc::Receiver<ciris_edge::transport::av_call::ReceivedFrame>,
-    mut events: tokio::sync::mpsc::Receiver<CallEvent>,
+    events: Arc<EventBox>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     let (mut tx, mut rx) = socket.split();
@@ -881,12 +1287,22 @@ async fn pump(
     });
     let out_e = out_tx.clone();
     let eng_e = Arc::clone(&engine);
+    let je = Arc::clone(&j);
     let event_task = tokio::spawn(async move {
+        let serve_seat = is_serve_seat(&eng_e).await;
         // The shares this socket has announced, so their end is a
         // `share_stopped` too (CSD-134).
         let mut shares: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-        while let Some(e) = events.recv().await {
+        while let Some(e) = events.next().await {
             let mut out = vec![event_json(&e)];
+            if matches!(e, CallEvent::RelayStatus { .. }) {
+                let g = je.call.lock().await;
+                if let Some(c) = g.as_ref() {
+                    let mut v = relay_view(&eng_e, c, serve_seat).await;
+                    v["type"] = json!("relay_status");
+                    out[0] = v;
+                }
+            }
             match &e {
                 CallEvent::StreamAdded {
                     publisher, stream, ..
@@ -953,19 +1369,58 @@ async fn pump(
                 }
             }
             tick = tick.wrapping_add(1);
-            let (budget, legs) = {
+            let (budget, legs, ended) = {
                 let g = jw.call.lock().await;
                 match g.as_ref() {
-                    Some(c) => (c.chunk_plaintext_budget(), c.legs()),
+                    Some(c) => (
+                        c.chunk_plaintext_budget(),
+                        c.legs(),
+                        match c.state() {
+                            EdgeCallState::Ended(cause) => Some(cause),
+                            _ => None,
+                        },
+                    ),
                     None => break,
                 }
             };
+            // The call is over the four-person limit and this device joined last
+            // (`hold_to_call_size`): say so, close, and the call is left.
+            let full = jw.full.load(std::sync::atomic::Ordering::Acquire);
+            if full > 0 {
+                let _ = out_w
+                    .send(Message::Text(call_full_json(full).to_string().into()))
+                    .await;
+                let _ = out_w
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::NORMAL,
+                        reason: "call_full".into(),
+                    })))
+                    .await;
+                break;
+            }
+            // Edge 45.2.0: the call ended under the socket (this device turned
+            // shaped-only or anonymous, left the room, or was hung up): say
+            // why, then close with the bare token as the close reason.
+            if let Some(cause) = ended {
+                let (token, _) = end_ids(&cause);
+                let _ = out_w
+                    .send(Message::Text(ended_json(&cause).to_string().into()))
+                    .await;
+                let _ = out_w
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::NORMAL,
+                        reason: token.into(),
+                    })))
+                    .await;
+                break;
+            }
             if budget.is_some() && budget != last_budget {
                 last_budget = budget;
                 // `fragmenting`: whether the node splits a frame over the budget
-                // (edge 45.1) or refuses it (v44). The client switches on THIS.
+                // (a video join: its stream is bound to `video_codecs`) or refuses it
+                // (audio only). The client switches on THIS.
                 let m = json!({ "type": "ready", "frame_budget_bytes": budget,
-                                "fragmenting": false });
+                                "fragmenting": jw.video });
                 if out_w
                     .send(Message::Text(m.to_string().into()))
                     .await
@@ -1145,7 +1600,7 @@ async fn share(
                 json!({}),
             );
         };
-        match call.add_stream(None).await {
+        match call.add_stream(video_codecs()).await {
             Ok(s) => (s, call.chunk_plaintext_budget()),
             Err(e) => {
                 tracing::warn!(room = %room, error = %e, "call: the share stream was refused");
@@ -1283,7 +1738,7 @@ async fn share_pump(socket: WebSocket, room: String, j: Arc<Joined>, stream: Str
         g.as_ref().and_then(|c| c.chunk_plaintext_budget())
     };
     let ready = json!({ "type": "ready", "kind": "share", "stream_id": hex::encode(stream.0),
-                        "frame_budget_bytes": budget, "fragmenting": false });
+                        "frame_budget_bytes": budget, "fragmenting": true });
     if tx
         .send(Message::Text(ready.to_string().into()))
         .await
@@ -1374,6 +1829,7 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
             axum::routing::get(frames_socket),
         )
         .route("/v1/chat/{room}/call/layers", axum::routing::post(layers))
+        .route("/v1/chat/{room}/call/relay", axum::routing::post(set_relay))
         .route(
             "/v1/chat/{room}/call/share",
             axum::routing::post(share).delete(unshare),
@@ -1584,6 +2040,26 @@ mod tests {
             CallEvent::VideoRestored {
                 publisher: "k".into(),
             },
+            CallEvent::RelayStatus {
+                relaying: true,
+                relaying_for: 3,
+            },
+            CallEvent::MediaPathRestored {
+                member: "k".into(),
+                via: PathKind::PeerRelay,
+                through: Some("b".into()),
+            },
+            CallEvent::MediaPathFailed {
+                member: "k".into(),
+                cause: ciris_edge::transport::media_path::MediaPathCause::NoMemberCouldRelay,
+                retryable: true,
+                retry_after_s: None,
+                detail: None,
+                tried: Vec::new(),
+                local_nat: ciris_edge::transport::media_path::NatReport::unknown(chrono::Utc::now()),
+                peer_nat: None,
+                relay: ciris_edge::transport::media_path::RelayStanding::NoneAvailable,
+            },
         ];
         for e in &built {
             let out = event_json(e);
@@ -1603,5 +2079,170 @@ mod tests {
         assert_eq!(signed_end("backgrounded"), SignedEnd::Backgrounded);
         assert_eq!(signed_end("left"), SignedEnd::Left);
         assert_eq!(signed_end("lost"), SignedEnd::Left);
+    }
+
+    /// Every way a call ends has its token and copy key, and the vectors the
+    /// client pins say the same (`call.ended` stays the CONFLICT string).
+    #[test]
+    fn a_call_end_names_its_token_and_copy() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/call_frames_v1.json"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pinned = v["events"]["call_ended_values"]
+            .as_object()
+            .unwrap()
+            .clone();
+        let causes = [
+            EndCause::HungUp,
+            EndCause::Revoked,
+            EndCause::Expired,
+            EndCause::MediaRefused {
+                token: "shaped_only_no_media",
+            },
+            EndCause::MediaRefused {
+                token: "onion_anonymous_no_media",
+            },
+        ];
+        // Edge's causes plus the server's own: a call over the four-person limit.
+        assert_eq!(pinned.len(), causes.len() + 1);
+        let full = call_full_json(5);
+        assert_eq!(pinned[full["ended"].as_str().unwrap()], full["reason_id"]);
+        for c in &causes {
+            let out = ended_json(c);
+            assert_eq!(out["type"], "call_ended");
+            let token = out["ended"].as_str().unwrap();
+            assert_eq!(pinned[token], out["reason_id"], "{token}");
+            assert_ne!(out["reason_id"], "call.ended");
+        }
+    }
+
+    /// Four people may be in a call, a fifth may not (Eric 2026-11-25).
+    #[test]
+    fn a_call_holds_four_people() {
+        assert!(call_has_room(1));
+        assert!(call_has_room(CALL_MAX_PEOPLE));
+        assert!(!call_has_room(CALL_MAX_PEOPLE + 1));
+        assert_eq!(CALL_MAX_PEOPLE, 4);
+        let v = call_full_json(5);
+        assert_eq!(v["type"], "call_ended");
+        assert_eq!(v["reason_id"], "call.full");
+        assert_eq!(v["max_people"], 4);
+    }
+
+    /// A client that reads nothing loses no state: edge's channel is emptied
+    /// (64 is its size, 200 events pass through), a share's end is told though
+    /// the member's camera stream ended and began around it, and the status is
+    /// the latest one.
+    #[tokio::test]
+    async fn events_are_read_though_no_client_reads_and_the_last_state_survives() {
+        let added = |s: u8| CallEvent::StreamAdded {
+            publisher: "m".into(),
+            stream: StreamId([s; 32]),
+            kind: 0,
+        };
+        let ended = |s: u8| CallEvent::StreamEnded {
+            publisher: "m".into(),
+            stream: StreamId([s; 32]),
+            cause: ciris_edge::transport::av_call::LeaveCause::Left,
+            truncated: false,
+        };
+        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        let b = EventBox::read(rx);
+        for e in [added(1), added(2)] {
+            tx.send(e).await.unwrap();
+        }
+        let first = b.next().await.expect("the camera");
+        assert!(matches!(first, CallEvent::StreamAdded { stream, .. } if stream.0 == [1; 32]));
+        let second = b.next().await.expect("the share");
+        assert!(matches!(second, CallEvent::StreamAdded { stream, .. } if stream.0 == [2; 32]));
+        // The client stops reading here. Every send below completes only if
+        // the box keeps reading.
+        for n in 0..200u16 {
+            let e = CallEvent::RelayStatus {
+                relaying: true,
+                relaying_for: n,
+            };
+            tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(e))
+                .await
+                .expect("the box reads though nobody reads it")
+                .unwrap();
+        }
+        tx.send(ended(2)).await.unwrap();
+        tx.send(ended(1)).await.unwrap();
+        tx.send(added(3)).await.unwrap();
+        drop(tx);
+        let mut seen = Vec::new();
+        while let Some(e) = b.next().await {
+            seen.push(e);
+        }
+        let status: Vec<u16> = seen
+            .iter()
+            .filter_map(|e| match e {
+                CallEvent::RelayStatus { relaying_for, .. } => Some(*relaying_for),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(status.last(), Some(&199), "the latest status is told last");
+        let ends: Vec<u8> = seen
+            .iter()
+            .filter_map(|e| match e {
+                CallEvent::StreamEnded { stream, .. } => Some(stream.0[0]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ends, vec![2, 1], "each stream's end is told");
+        assert!(seen
+            .iter()
+            .any(|e| matches!(e, CallEvent::StreamAdded { stream, .. } if stream.0 == [3; 32])));
+    }
+
+    /// One-off notices are bounded; they never push out a state.
+    #[test]
+    fn unread_notices_are_bounded_and_never_push_out_a_state() {
+        let b = EventBox::default();
+        b.put(CallEvent::AttendeeJoined { key_id: "a".into() });
+        for n in 0..(MAX_WAITING_NOTICES as u64 + 50) {
+            b.put(CallEvent::EpochRolled { from: n, to: n + 1 });
+        }
+        b.put(CallEvent::AttendeeLeft {
+            key_id: "a".into(),
+            stream: StreamId([1; 32]),
+            cause: ciris_edge::transport::av_call::LeaveCause::Left,
+            truncated: false,
+        });
+        let q = b.waiting.lock().unwrap();
+        assert_eq!(q.len(), MAX_WAITING_NOTICES + 1);
+        assert!(matches!(q.back(), Some(CallEvent::AttendeeLeft { .. })));
+        assert!(!q
+            .iter()
+            .any(|e| matches!(e, CallEvent::AttendeeJoined { .. })));
+    }
+
+    /// A serve seat and a phone that did not say never relay; any other member
+    /// node relays by default (Eric 2026-11-22).
+    #[test]
+    fn a_serve_seat_never_relays_by_default() {
+        assert!(!relay_default(true, false));
+        assert!(!relay_default(true, true));
+        assert!(!relay_default(false, true));
+        assert!(relay_default(false, false));
+    }
+
+    /// A path event's member and `through` share the attendee id space, and
+    /// `direct` is every technique but a member relay.
+    #[test]
+    fn a_restored_path_says_direct_or_through_whom() {
+        for k in PathKind::ALL {
+            let out = event_json(&CallEvent::MediaPathRestored {
+                member: "k".into(),
+                via: *k,
+                through: (*k == PathKind::PeerRelay).then(|| "b".to_owned()),
+            });
+            assert_eq!(out["via"], k.token());
+            assert_eq!(out["direct"], *k != PathKind::PeerRelay);
+        }
     }
 }

@@ -182,13 +182,45 @@ impl Watch {
 /// is `WARN` rather than `INFO` because an uncomputed signal is not a healthy
 /// one and this whole arc exists because an absence read as an absence of
 /// problems.
-fn say(reading: Reading, emit: Emit, corpus: Result<TraceCorpus, &str>) {
+/// Whether a non-green reading is ordinary rather than a fault: the node is NOT
+/// a trace receiver (it holds no canonical role) AND nothing has been refused
+/// on its ingest path, so no producer is pointed at it and failing. A person's
+/// laptop or phone ships its traces to the canonical and receives none; its
+/// corpus goes `dark` as a matter of course, and the watch was logging that at
+/// ERROR every six hours (LTS log audit, 2026-11-21). A refusal anywhere keeps
+/// the band's severity: someone IS offering this node traces, so its standing
+/// matters whatever its role.
+#[must_use]
+pub const fn quiet_on(reading: Reading, receiver: bool) -> bool {
+    !receiver
+        && matches!(
+            reading.ingest,
+            IngestStanding::NotExercised | IngestStanding::Clean | IngestStanding::Unreadable
+        )
+}
+
+fn say(reading: Reading, emit: Emit, corpus: Result<TraceCorpus, &str>, receiver: bool) {
     let last_admitted = corpus.ok().and_then(|c| c.last_admitted_at);
     let rows = corpus.ok().map(|c| c.rows);
     let why = match emit {
         Emit::Changed => "changed",
         Emit::Restated => "unchanged (restated)",
     };
+    if reading.band() != StateBand::Green && quiet_on(reading, receiver) {
+        tracing::info!(
+            trace_plane = reading.trace.as_str(),
+            ingest = reading.ingest.as_str(),
+            ?last_admitted,
+            ?rows,
+            why,
+            receiver = false,
+            "trace-plane watch: {} — this node is not a trace receiver (no canonical role) and \
+             nothing is offering it traces, so this is informational. \
+             GET /v1/node/state carries the full reading",
+            reading.trace.message().0,
+        );
+        return;
+    }
     match reading.band() {
         StateBand::Green => tracing::info!(
             trace_plane = reading.trace.as_str(),
@@ -223,6 +255,16 @@ fn say(reading: Reading, emit: Emit, corpus: Result<TraceCorpus, &str>) {
     }
 }
 
+/// Whether this node is a trace receiver: it holds the canonical role. Unknown
+/// (no wire identity yet, or the role read failed) counts as a receiver, so a
+/// doubt keeps the loud severity rather than inventing a quiet one.
+async fn is_receiver(engine: &Engine) -> bool {
+    match crate::node_key::wire_identity() {
+        Some(me) => engine.is_canonical(me).await.unwrap_or(true),
+        None => true,
+    }
+}
+
 /// Take ONE reading and log it if the policy says to. Returns what it emitted,
 /// so a caller (and a test) can see the decision rather than infer it from a log.
 pub async fn tick(
@@ -247,6 +289,7 @@ pub async fn tick(
             reading,
             emit,
             corpus.as_ref().copied().map_err(String::as_str),
+            is_receiver(engine).await,
         );
     }
     emit
@@ -312,6 +355,44 @@ mod tests {
 
     const LIVE: Reading = reading(TracePlaneStanding::Live, IngestStanding::Clean);
     const DARK: Reading = reading(TracePlaneStanding::Dark, IngestStanding::StuckProducer);
+
+    /// The LTS log audit's false alarm (2026-11-21): a laptop that ships its
+    /// traces to the canonical and receives none read `dark` and logged ERROR
+    /// every six hours. Off a receiver with nothing offered, a dark (or quiet,
+    /// or never-admitted) plane is informational; a receiver keeps every band.
+    #[test]
+    fn a_dark_plane_is_informational_only_off_a_receiver_with_nothing_offered() {
+        for trace in [
+            TracePlaneStanding::Dark,
+            TracePlaneStanding::Quiet,
+            TracePlaneStanding::NeverAdmitted,
+        ] {
+            for ingest in [
+                IngestStanding::NotExercised,
+                IngestStanding::Clean,
+                IngestStanding::Unreadable,
+            ] {
+                let r = reading(trace, ingest);
+                assert!(quiet_on(r, false), "{r:?} off a receiver is ordinary");
+                assert!(!quiet_on(r, true), "{r:?} on a receiver keeps its band");
+            }
+        }
+    }
+
+    /// Someone offering traces to a node that is not a receiver is still news:
+    /// every refusal standing keeps its severity whatever the role.
+    #[test]
+    fn a_refusal_keeps_its_severity_on_any_node() {
+        for ingest in [
+            IngestStanding::Unattributed,
+            IngestStanding::Background,
+            IngestStanding::StuckProducer,
+        ] {
+            let r = reading(TracePlaneStanding::Dark, ingest);
+            assert!(!quiet_on(r, false), "{r:?} must stay loud off a receiver");
+            assert!(!quiet_on(r, true));
+        }
+    }
 
     /// A node that comes up ALREADY DARK has no transition to observe. If the
     /// watch waited for a change it would be silent in exactly the case it

@@ -733,25 +733,26 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # THE CALLS CUT (edge 45.2.0, 0.5.254): a shaped-only device's call refusal.
+    # Queued for the client bundle with its English, beside the built ids the
+    # guard cannot see (call.end.*, call.media_path_failed.<cause>,
+    # call.relay_standing.<relay>; tests/vectors/call_frames_v1.json).
+    "call.shaped_only",
+    # The four-person call limit (Eric 2026-11-25, edge 45.2.0): the join refusal
+    # and the call_ended reason. Queued for the client bundle with its English.
+    "call.full",
+    # PAID AT CLIENT 0.5.242 (2026-11-26, for 0.5.254): the image-rendition,
+    # share, takedown and room_full ids below, ten in all; the floor in
+    # pyproject.toml is 0.5.242.
     # IMAGE RENDITIONS (CIRISServer#614, 0.5.250): the rendition route's and the
     # shared-room image ingest's refusals. Queued for the client bundle with
     # their English; they leave at the floor that pins 0.5.250.
-    "drive.image_too_large",
-    "drive.image_undecodable",
-    "drive.no_rendition",
-    "drive.unknown_rendition",
     # SCREEN, APP AND WINDOW SHARING (CSD-134, 0.5.250): the share routes' two new
     # refusals (the rest reuse call.* ids the bundle carries). Same queue.
-    "call.no_share",
-    "call.share_already_live",
     # ROOM TAKEDOWN (CC 4.5.3, 0.5.247): the takedown route's refusals. Queued for
     # the client bundle with their English; they leave at the floor that pins 0.5.247.
-    "moderation.nothing_to_take_down",
-    "moderation.takedown_failed",
-    "moderation.takedown_needs_reason",
     # LARGE ROOMS (0.5.247): a full room's refusal, which replaces
     # `community.two_people_only` (rooms seat up to 100 people). Queued the same way.
-    "community.room_full",
     # PAID AT CLIENT 0.5.241 (2026-11-13, for 0.5.247): the 0.5.246 queue —
     # the decisions queue, the member calls, room moderation, appeals and two
     # people per room — 28 ids, in all 29 languages; the floor in

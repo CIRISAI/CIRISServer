@@ -1012,7 +1012,7 @@ async fn room_key(
     // restart: reload it rather than create or join a second group.
     let store = crate::mls_state::store_for(&st.node_signer.key_id);
     if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
-        if let Some(group) = crate::mls_state::load(&store, &room).await? {
+        if let Some(group) = crate::mls_state::load_shared(&st.node_signer.key_id, &room).await? {
             // A CREATOR'S HANDSHAKE THAT NEVER FINISHED (Codex, #689). `create`
             // and `add_member` persist before the Welcome is placed; a crash in
             // that window reloads a group the joiner was never welcomed into,
@@ -1028,6 +1028,7 @@ async fn room_key(
                      interrupted; recreating it"
                 );
                 crate::mls_state::forget(&store, &room).await?;
+                crate::mls_state::evict(&st.node_signer.key_id, &room).await;
             } else {
                 tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
                 rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
@@ -1120,6 +1121,8 @@ async fn room_key(
                 .to_vec();
             let row = chat::welcome_attestation(author, peer, &welcome, epoch, chrono::Utc::now())
                 .await?;
+            // The node's one live handle for the room (calls hold it too).
+            let group = crate::mls_state::share(&st.node_signer.key_id, &room, group).await?;
             share_in_room(
                 &*dir,
                 row,
@@ -1215,7 +1218,7 @@ async fn room_key(
             // mints and publishes a fresh KeyPackage.
             crate::mls_state::clear_pending(&store, &room).await;
             let group = match joined {
-                Ok(g) => g,
+                Ok(g) => crate::mls_state::share(&st.node_signer.key_id, &room, g).await?,
                 Err(e) => {
                     tracing::warn!(
                         room = %room,
@@ -1303,7 +1306,7 @@ pub(crate) async fn room_key_room(
     // (CIRISServer#630).
     let store = crate::mls_state::store_for(&st.node_signer.key_id);
     if !matches!(rooms.get(room), Some(RoomState::Keyed(_))) {
-        if let Some(group) = crate::mls_state::load(&store, room).await? {
+        if let Some(group) = crate::mls_state::load_shared(&st.node_signer.key_id, room).await? {
             tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
             rooms.insert(room.to_owned(), RoomState::Keyed(Arc::new(group)));
         }
@@ -1326,11 +1329,12 @@ pub(crate) async fn room_key_room(
         return Ok(RoomHandshake::NoAuthorSigner);
     };
     if me == creator {
-        let group = Arc::new(
+        let created =
             CohortGroup::create(store.clone(), room, me, crate::mls_state::RETAINED_EPOCHS)
                 .await
-                .map_err(|e| format!("CohortGroup::create: {e}"))?,
-        );
+                .map_err(|e| format!("CohortGroup::create: {e}"))?;
+        // The node's one live handle for the room (calls hold it too).
+        let group = Arc::new(crate::mls_state::share(&st.node_signer.key_id, room, created).await?);
         reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
         ensure_room_addresses(st, room, &group).await;
         rooms.insert(room.to_owned(), RoomState::Keyed(group));
@@ -1392,7 +1396,8 @@ pub(crate) async fn room_key_room(
     .await;
     // Spent either way (Codex, #689).
     crate::mls_state::clear_pending(&store, room).await;
-    let group = Arc::new(joined.map_err(|e| format!("CohortGroup::join: {e}"))?);
+    let joined = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
+    let group = Arc::new(crate::mls_state::share(&st.node_signer.key_id, room, joined).await?);
     apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));
@@ -4061,15 +4066,17 @@ async fn start_chat(
     //    accepts the creator's invitation once it arrives (step 1).
     if ciris_edge::chat::PairRole::of(&owner.key_id, &key_id) == ciris_edge::chat::PairRole::Joiner
     {
-        return pair_room_response(
-            &st,
-            &community_id,
-            &pair_members,
-            false,
-            PAIR_STATE_AWAITING_INVITATION,
-            None,
-        )
-        .await;
+        // A joiner ALREADY SEATED is not awaiting anything: once its acceptance
+        // was widened the invitation is consumed, so step 1 finds none and a
+        // re-open of the chat landed here and answered `awaiting_invitation` for
+        // a room it was a founder of (LTS log audit, 2026-11-21). The fold
+        // decides, as everywhere else on this route.
+        let state = if seated_in(&*directory, &community_id, &owner.key_id).await {
+            PAIR_STATE_OPEN
+        } else {
+            PAIR_STATE_AWAITING_INVITATION
+        };
+        return pair_room_response(&st, &community_id, &pair_members, false, state, None).await;
     }
 
     // 3. Open it (or re-open it) as the creator: found alone, propose the peer.
@@ -4354,6 +4361,22 @@ async fn advance_pair_join(st: &ChatState, headers: &HeaderMap, owner: &Owner, r
         ciris_edge::membership::MembershipWidener::new(vec![Arc::clone(pen.edge_signer())]);
     let _ =
         crate::membership_invites::widen_held_acceptances(&*directory, &invites, &widener).await;
+}
+
+/// Whether `key_id` holds an active seat in `community_id`, by the FOLD (the
+/// active roster), never the record. A read failure is "not seated", which
+/// answers the pre-seat state rather than claiming a seat.
+async fn seated_in(
+    directory: &dyn ciris_persist::federation::FederationDirectory,
+    community_id: &str,
+    key_id: &str,
+) -> bool {
+    let Ok(Some(record)) = directory.lookup_community(community_id).await else {
+        return false;
+    };
+    active_roster(directory, &record)
+        .await
+        .is_ok_and(|r| r.iter().any(|m| m.key_id == key_id))
 }
 
 /// The pair room is open: both people are active founders.

@@ -4079,6 +4079,30 @@ async fn a_joiner_who_asks_once_converges_with_nobody_reading_the_room() {
             .all(|i| i["pair_id"] != serde_json::json!(pair)),
         "the seated room's request is removed"
     );
+
+    // SEATED, the person opens the chat again: the invitation is consumed, so
+    // the route must read the fold, not fall through to the joiner's
+    // "nothing held yet" answer (LTS log audit, 2026-11-21: a seated node
+    // answered `awaiting_invitation`).
+    let resp = client
+        .post(format!("{base}/v1/chat"))
+        .bearer_auth(&owner)
+        .json(&serde_json::json!({ "key_id": AARON_KEY_ID }))
+        .send()
+        .await
+        .expect("POST /v1/chat, again");
+    let v: serde_json::Value = resp.json().await.expect("json");
+    assert_eq!(
+        v["state"], "open",
+        "a seated joiner is not awaiting anything: {v}"
+    );
+    let members: Vec<&str> = v["member_key_ids"]
+        .as_array()
+        .expect("members")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(members.contains(&owner_id.key_id.as_str()), "{v}");
 }
 
 /// **#775 — infrastructure is never a contact.** Sharing traces with a canonical
