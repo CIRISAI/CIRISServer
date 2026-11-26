@@ -115,8 +115,15 @@ requires-python = ">=3.10"
 # first that decodes the 202 `invited` a community add now answers — 0.5.225
 # cannot. Its GitHub release lacked the iOS .xcframework.zip when this floor
 # moved (CIRISClient#148); this pin installs the PyPI package only.
+# FLOOR 0.5.242 (2026-11-26, for 0.5.254): the first client whose bundle
+# carries the image-rendition, share, takedown and room_full ids
+# (drive.image_too_large, drive.image_undecodable, drive.no_rendition,
+# drive.unknown_rendition, call.no_share, call.share_already_live,
+# moderation.nothing_to_take_down, moderation.takedown_failed,
+# moderation.takedown_needs_reason, community.room_full), so they leave
+# KNOWN_UNLOCALIZED. call.full and call.shaped_only stay queued for 0.5.243.
 dependencies = [
-    "ciris-client>=0.5.241,<0.6",
+    "ciris-client>=0.5.242,<0.6",
 ]
 
 [project.urls]
