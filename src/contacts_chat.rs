@@ -1012,7 +1012,7 @@ async fn room_key(
     // restart: reload it rather than create or join a second group.
     let store = crate::mls_state::store_for(&st.node_signer.key_id);
     if !matches!(rooms.get(&room), Some(RoomState::Keyed(_))) {
-        if let Some(group) = crate::mls_state::load(&store, &room).await? {
+        if let Some(group) = crate::mls_state::load_shared(&st.node_signer.key_id, &room).await? {
             // A CREATOR'S HANDSHAKE THAT NEVER FINISHED (Codex, #689). `create`
             // and `add_member` persist before the Welcome is placed; a crash in
             // that window reloads a group the joiner was never welcomed into,
@@ -1028,6 +1028,7 @@ async fn room_key(
                      interrupted; recreating it"
                 );
                 crate::mls_state::forget(&store, &room).await?;
+                crate::mls_state::evict(&st.node_signer.key_id, &room).await;
             } else {
                 tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
                 rooms.insert(room.clone(), RoomState::Keyed(Arc::new(group)));
@@ -1120,6 +1121,8 @@ async fn room_key(
                 .to_vec();
             let row = chat::welcome_attestation(author, peer, &welcome, epoch, chrono::Utc::now())
                 .await?;
+            // The node's one live handle for the room (calls hold it too).
+            let group = crate::mls_state::share(&st.node_signer.key_id, &room, group).await?;
             share_in_room(
                 &*dir,
                 row,
@@ -1215,7 +1218,7 @@ async fn room_key(
             // mints and publishes a fresh KeyPackage.
             crate::mls_state::clear_pending(&store, &room).await;
             let group = match joined {
-                Ok(g) => g,
+                Ok(g) => crate::mls_state::share(&st.node_signer.key_id, &room, g).await?,
                 Err(e) => {
                     tracing::warn!(
                         room = %room,
@@ -1303,7 +1306,7 @@ pub(crate) async fn room_key_room(
     // (CIRISServer#630).
     let store = crate::mls_state::store_for(&st.node_signer.key_id);
     if !matches!(rooms.get(room), Some(RoomState::Keyed(_))) {
-        if let Some(group) = crate::mls_state::load(&store, room).await? {
+        if let Some(group) = crate::mls_state::load_shared(&st.node_signer.key_id, room).await? {
             tracing::info!(room = %room, "chat: room group RELOADED from the durable MLS store");
             rooms.insert(room.to_owned(), RoomState::Keyed(Arc::new(group)));
         }
@@ -1326,11 +1329,12 @@ pub(crate) async fn room_key_room(
         return Ok(RoomHandshake::NoAuthorSigner);
     };
     if me == creator {
-        let group = Arc::new(
+        let created =
             CohortGroup::create(store.clone(), room, me, crate::mls_state::RETAINED_EPOCHS)
                 .await
-                .map_err(|e| format!("CohortGroup::create: {e}"))?,
-        );
+                .map_err(|e| format!("CohortGroup::create: {e}"))?;
+        // The node's one live handle for the room (calls hold it too).
+        let group = Arc::new(crate::mls_state::share(&st.node_signer.key_id, room, created).await?);
         reconcile_room_group(st, room, &scope_room, &roster, &group, author).await?;
         ensure_room_addresses(st, room, &group).await;
         rooms.insert(room.to_owned(), RoomState::Keyed(group));
@@ -1392,7 +1396,8 @@ pub(crate) async fn room_key_room(
     .await;
     // Spent either way (Codex, #689).
     crate::mls_state::clear_pending(&store, room).await;
-    let group = Arc::new(joined.map_err(|e| format!("CohortGroup::join: {e}"))?);
+    let joined = joined.map_err(|e| format!("CohortGroup::join: {e}"))?;
+    let group = Arc::new(crate::mls_state::share(&st.node_signer.key_id, room, joined).await?);
     apply_creator_commits(st, room, &scope_room, &creator, &group, Some(author)).await;
     ensure_room_addresses(st, room, &group).await;
     rooms.insert(room.to_owned(), RoomState::Keyed(group));

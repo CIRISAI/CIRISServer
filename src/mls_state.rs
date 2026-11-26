@@ -333,6 +333,66 @@ pub fn posture_for(node_key_id: &str) -> Option<Posture> {
         .and_then(|r| r.get(node_key_id).map(|(_, p, _)| p.clone()))
 }
 
+/// **One live handle per room per node** (2026-11-25). A call keys from the
+/// Edge's [`CohortGroups`] (`Edge::join_call` opens the room there and keeps
+/// that handle for the call's life); the chat driver used to hold a second,
+/// independent [`CohortGroup`] over the same store. Each handle keeps its own
+/// in-memory MLS state, so a commit the chat driver applied (a member added or
+/// removed) never reached a call already holding the other handle: a call
+/// joined while that commit was in flight stayed on the old epoch, dialled
+/// addresses nobody registered, and never connected until a restart (edge's
+/// reading of the N=6/250 run that never formed, 0.5.254). Every chat room
+/// group is now taken from, or handed to, this one registry, which the Edge's
+/// calls read too ([`CohortGroup`] clones share one state).
+pub fn groups_for(node_key_id: &str) -> std::sync::Arc<ciris_edge::mls::CohortGroups> {
+    type Groups = HashMap<String, std::sync::Arc<ciris_edge::mls::CohortGroups>>;
+    static G: OnceLock<Mutex<Groups>> = OnceLock::new();
+    let mut g = match G.get_or_init(|| Mutex::new(HashMap::new())).lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    std::sync::Arc::clone(g.entry(node_key_id.to_owned()).or_insert_with(|| {
+        std::sync::Arc::new(ciris_edge::mls::CohortGroups::with_retention(
+            store_for(node_key_id),
+            node_key_id.to_owned(),
+            RETAINED_EPOCHS,
+        ))
+    }))
+}
+
+/// `room`'s live group from the node's registry, reloading it from the store
+/// if no handle is live: [`load`] through [`groups_for`].
+pub async fn load_shared(node_key_id: &str, room: &str) -> Result<Option<CohortGroup>, String> {
+    groups_for(node_key_id)
+        .open_existing(room)
+        .await
+        .map_err(|e| format!("reload the MLS group for {room}: {e}"))
+}
+
+/// Hand a group the chat driver just created or joined (and so persisted) to
+/// the node's registry, and get back the registry's live handle for it, the one
+/// a call will also hold. Any handle the registry still had for `room` is
+/// dropped first, so the store's head is what every holder sees from here on.
+pub async fn share(
+    node_key_id: &str,
+    room: &str,
+    fresh: CohortGroup,
+) -> Result<CohortGroup, String> {
+    drop(fresh);
+    let groups = groups_for(node_key_id);
+    groups.evict(room).await;
+    groups
+        .open_existing(room)
+        .await
+        .map_err(|e| format!("reopen the MLS group for {room}: {e}"))?
+        .ok_or_else(|| format!("the MLS group for {room} was not persisted"))
+}
+
+/// Drop the registry's live handle for `room` (its stored state was forgotten).
+pub async fn evict(node_key_id: &str, room: &str) {
+    groups_for(node_key_id).evict(room).await;
+}
+
 /// Reload `room`'s group from the store, if this node persisted one — the
 /// restart path. `Ok(None)`: this node never had the room (or runs ephemeral).
 pub async fn load(store: &ScopeStateProvider, room: &str) -> Result<Option<CohortGroup>, String> {
@@ -439,6 +499,39 @@ mod tests {
                 .map(|d| d.as_nanos())
                 .unwrap_or_default()
         ))
+    }
+
+    /// The chat driver and a call hold ONE state: a member the chat driver
+    /// adds through its handle is seen through the handle a call opened from
+    /// the registry earlier, with no reload.
+    #[tokio::test]
+    async fn chat_and_a_call_share_one_room_state() {
+        let node = format!("node-share-{}", std::process::id());
+        let room = "chat:room:v1:share-test";
+        let created = CohortGroup::create(store_for(&node), room, &node, RETAINED_EPOCHS)
+            .await
+            .expect("create");
+        let chat = share(&node, room, created).await.expect("share");
+        // The call opens the room through the Edge's registry: the same one.
+        let call = groups_for(&node)
+            .open_existing(room)
+            .await
+            .expect("open")
+            .expect("held");
+        let before = call.epoch().await;
+        let (_m, kp) =
+            ciris_edge::mls::cohort_group::mint_cohort_key_material("node-b").expect("mint");
+        let _commit = chat.add_member("node-b", kp).await.expect("add node-b");
+        assert!(
+            call.epoch().await > before,
+            "the call's handle sees the chat driver's commit"
+        );
+        assert!(call.member_key_ids().await.iter().any(|m| m == "node-b"));
+        assert!(std::sync::Arc::ptr_eq(
+            &groups_for(&node),
+            &groups_for(&node)
+        ));
+        evict(&node, room).await;
     }
 
     /// A group created before a "restart" reloads after it: same room, same

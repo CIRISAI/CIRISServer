@@ -504,7 +504,9 @@ mod tests {
 
     #[test]
     fn a_summary_says_when_the_event_last_happened_not_just_when_it_flushed() {
-        let before = chrono::Utc::now();
+        // `last_at` is printed to the millisecond; `before` is not, so in the
+        // same millisecond it read as later (a CI-only red).
+        let before = chrono::Utc::now() - chrono::Duration::milliseconds(1);
         let s = link_storm(20, 2);
         let last = chrono::DateTime::parse_from_rfc3339(&s["last_at"]).expect("rfc3339 last_at");
         assert!(last >= before, "{s:?}");

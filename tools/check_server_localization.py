@@ -733,6 +733,14 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # THE CALLS CUT (edge 45.2.0, 0.5.254): a shaped-only device's call refusal.
+    # Queued for the client bundle with its English, beside the built ids the
+    # guard cannot see (call.end.*, call.media_path_failed.<cause>,
+    # call.relay_standing.<relay>; tests/vectors/call_frames_v1.json).
+    "call.shaped_only",
+    # The four-person call limit (Eric 2026-11-25, edge 45.2.0): the join refusal
+    # and the call_ended reason. Queued for the client bundle with its English.
+    "call.full",
     # IMAGE RENDITIONS (CIRISServer#614, 0.5.250): the rendition route's and the
     # shared-room image ingest's refusals. Queued for the client bundle with
     # their English; they leave at the floor that pins 0.5.250.

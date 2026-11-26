@@ -5443,6 +5443,10 @@ pub(crate) async fn start_replication_runtime(
         ))),
         // persist v52 / edge v38 (CIRISPersist#955) — see the block above.
         membership_widener,
+        // edge 45.2.0 (CIRISEdge#1029): room-join rows admitted from a peer
+        // are announced as `RowAdmitted` on the host's bus, the hook for
+        // seating on the decision and adding on the KeyPackage without a poll.
+        events: HOST_EVENT_BUS.get().cloned(),
         // Every OTHER field edge v38.0.0 added to a host-set surface, named so
         // the next adopt diffs against a list rather than a memory:
         // `ReplicationRuntimeConfig::membership_widener` (set, above) is the
@@ -5567,6 +5571,11 @@ pub(crate) fn spawn_announce_logger(bus: Arc<ciris_edge::events::EventBus>) {
 /// tap makes every other transition (esp. whether an announce was even SENT,
 /// and link/path churn) impossible to miss. Spawned beside the announce logger
 /// wherever the event bus is subscribed.
+/// The node's edge event bus, set where the transport builds it and read by
+/// the replication runtime (`ReplicationRuntimeConfig::events`).
+static HOST_EVENT_BUS: std::sync::OnceLock<Arc<ciris_edge::events::EventBus>> =
+    std::sync::OnceLock::new();
+
 pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
     use ciris_edge::events::{EventKind, EventSeverity};
     use tokio::sync::broadcast::error::RecvError;
@@ -5577,6 +5586,12 @@ pub(crate) fn spawn_event_bus_logger(bus: Arc<ciris_edge::events::EventBus>) {
                 Ok(ev) => {
                     // The announce logger already narrates AnnounceReceived.
                     if matches!(ev.kind, EventKind::AnnounceReceived) {
+                        continue;
+                    }
+                    // A room-join row admitted (edge 45.2.0): one per roster,
+                    // KeyPackage, Welcome... in a 12-person join; debug only.
+                    if matches!(ev.kind, EventKind::RowAdmitted { .. }) {
+                        tracing::debug!(kind = ?ev.kind, "edge-event: row admitted");
                         continue;
                     }
                     let dest = ev.destination_hash.as_deref().map(hex::encode);
@@ -5686,10 +5701,10 @@ async fn shaping_device(
 /// store the chat driver opens for this node. Read only when a call joins.
 fn room_groups_for(key_id: &str) -> Arc<ciris_edge::mls::CohortGroups> {
     let me = crate::node_key::wire_identity().unwrap_or(key_id);
-    Arc::new(ciris_edge::mls::CohortGroups::new(
-        crate::mls_state::store_for(me),
-        me.to_owned(),
-    ))
+    // The SAME registry the chat driver takes its room groups from
+    // (`mls_state::groups_for`): one live handle per room, so a call follows
+    // the room's commits.
+    crate::mls_state::groups_for(me)
 }
 
 async fn build_edge(
@@ -5933,6 +5948,9 @@ async fn build_edge(
     // is answerable from `ciris-server.log` instead of a mystery. Subscribe
     // BEFORE the transport starts so no early announce is missed.
     let event_bus = Arc::new(ciris_edge::events::EventBus::default());
+    // The replication runtime announces room-join rows on this same bus
+    // (edge 45.2.0 `RowAdmitted`, CIRISEdge#1029); it starts later.
+    let _ = HOST_EVENT_BUS.set(Arc::clone(&event_bus));
     spawn_announce_logger(Arc::clone(&event_bus));
     spawn_event_bus_logger(Arc::clone(&event_bus));
 

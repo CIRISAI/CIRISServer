@@ -256,6 +256,40 @@ class Node:
         if got.returncode != 0:
             raise MeshError(f"{self.name}: tc netem {' '.join(spec)}: {got.stderr[-400:]}")
 
+    def netem_lift(self) -> None:
+        """Lift a rate cap the way an uplink recovers: the queue already built
+        drains at full speed. Deleting the qdisc (netem() with no args) DISCARDS
+        that backlog (550 packets, ~11 s of audio at 250 kbit/s, 2026-11-25),
+        which a real recovery never does. Call netem() later to remove it."""
+        if not self.container:
+            raise MeshError("netem needs HARNESS_DOCKER=1")
+        got = subprocess.run(["docker", "exec", "-u", "0", self.container, "tc", "qdisc",
+                              "change", "dev", "eth0", "root", "netem", "rate", "10gbit",
+                              "limit", "1000"], capture_output=True, text=True)
+        if got.returncode != 0:
+            raise MeshError(f"{self.name}: tc netem change: {got.stderr[-400:]}")
+
+    def qdisc_stats(self) -> Dict[str, int]:
+        """This node's root qdisc counters (docker mode): sent bytes/packets,
+        dropped, overlimits, requeues and the backlog in bytes and packets.
+        Empty when there is none or it can't be read."""
+        if not self.container:
+            return {}
+        got = subprocess.run(["docker", "exec", "-u", "0", self.container, "tc", "-s", "qdisc",
+                              "show", "dev", "eth0"], capture_output=True, text=True)
+        out: Dict[str, int] = {}
+        m = re.search(r"Sent (\d+) bytes (\d+) pkt \(dropped (\d+), overlimits (\d+) requeues (\d+)\)",
+                      got.stdout)
+        if m:
+            for k, v in zip(("sent_bytes", "sent_pkts", "dropped", "overlimits", "requeues"), m.groups()):
+                out[k] = int(v)
+        b = re.search(r"backlog (\d+)([KMG]?)b (\d+)p", got.stdout)
+        if b:
+            mult = {"": 1, "K": 1000, "M": 1000_000, "G": 1000_000_000}[b.group(2)]
+            out["backlog_bytes"] = int(b.group(1)) * mult
+            out["backlog_pkts"] = int(b.group(3))
+        return out
+
     def start(self, health_timeout: float = 120.0) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         if self.container:

@@ -14,6 +14,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1414,6 +1415,7 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
     # torn down ChannelExhausted while capped, no gap over AV_CAP_MAX_GAP_S.
     cap_min = float(os.environ.get("AV_CAP_MIN_RATIO", "0.9"))
     cap_max_gap = float(os.environ.get("AV_CAP_MAX_GAP_S", "5"))
+    base_max_gap = float(os.environ.get("AV_BASE_MAX_GAP_S", "1.5"))
     # The ALM's decisions, read as a sequence (who was admitted, shed,
     # re-parented, why): DEBUG at edge, never collapsed by the dedup layer.
     rl = mesh.base_env.get("RUST_LOG") or "info"
@@ -1488,14 +1490,49 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
 
         wait_for(f"{m.name} seated", is_seated, args.arrive_wait * 2, every=2)
         seated.append(m)
-    probe = founder.say(room, "before the call")
-    for m in nodes:
-        def read_probe(m: Node = m) -> Optional[bool]:
-            founder.room(room)
-            return True if any(x.get("attestation_id") == probe and x.get("body")
-                               for x in m.room(room)["messages"]) else None
-        wait_for(f"{m.name} to read the room", read_probe, args.arrive_wait * 2, every=2)
-    step("room_ready", members=n_members, setup_s=round(time.time() - t_setup, 1))
+    # AV_JOIN_RACE=1: everyone joins the call the moment the last member is
+    # seated, before the nodes have applied its Add commit (edge 2026-11-25:
+    # such a call stayed on the old epoch and never formed). Otherwise the room
+    # is ready only when every node's group is at the founder's epoch with
+    # every member, and every node reads the room.
+    race = os.environ.get("AV_JOIN_RACE") == "1"
+    if race:
+        # The newest member must hold the group (it was welcomed) or its own
+        # join is refused not_a_member; the others are NOT waited for.
+        last = nodes[-1]
+        wait_for(f"{last.name} to hold the room's group",
+                 lambda: True if last.api("GET", f"/v1/qa/room/epoch?room={room}")[0] == 200 else None,
+                 args.arrive_wait * 2, every=0.2)
+        lag = {}
+        for n in nodes:
+            st, body = n.api("GET", f"/v1/qa/room/epoch?room={room}")
+            lag[n.name] = (body or {}).get("epoch") if st == 200 and isinstance(body, dict) else st
+        step("race_epochs", epochs=lag)
+    if not race:
+        probe = founder.say(room, "before the call")
+        for m in nodes:
+            def read_probe(m: Node = m) -> Optional[bool]:
+                founder.room(room)
+                return True if any(x.get("attestation_id") == probe and x.get("body")
+                                   for x in m.room(room)["messages"]) else None
+            wait_for(f"{m.name} to read the room", read_probe, args.arrive_wait * 2, every=2)
+
+        def epochs() -> Dict[str, Any]:
+            out = {}
+            for n in nodes:
+                st, body = n.api("GET", f"/v1/qa/room/epoch?room={room}")
+                out[n.name] = (body or {}) if st == 200 and isinstance(body, dict) else {"status": st}
+            return out
+
+        def one_epoch() -> Optional[Dict[str, Any]]:
+            e = epochs()
+            got = {v.get("epoch") for v in e.values()}
+            full = all(len(v.get("members") or []) >= n_members for v in e.values())
+            return e if len(got) == 1 and None not in got and full else None
+
+        at = wait_for("every node at the room's final epoch", one_epoch, args.arrive_wait * 2, every=1)
+        step("room_epoch", epoch=next(iter(at.values())).get("epoch"))
+    step("room_ready", members=n_members, setup_s=round(time.time() - t_setup, 1), race=race)
 
     placed = []
     for n in nodes:
@@ -1518,10 +1555,15 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                for n in nodes}
     size = min([size] + list(budgets.values()))
     step("legs_up", budgets=budgets, frame_bytes=size)
-    total = base_s + cap_s + lift_s + 10
+    # Generous: a stream that ends inside a phase reads as silence. At 10 s of
+    # slack, the capped node's own snapshot (its API rides the capped uplink) ran
+    # past it and every lift phase measured after it was 0 (2026-11-25).
+    total = base_s + cap_s + lift_s + 300
+    stream_at: Dict[str, float] = {}
     for n in nodes:
         n.must("POST", "/v1/qa/call/stream",
                {"room": room, "rate_hz": rate, "frame_bytes": size, "seconds": total})
+        stream_at[n.name] = time.time()
 
     capped = nodes[0]
     capped_key = capped.node_key_id or capped.key_id
@@ -1535,6 +1577,7 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
         return 0
 
     close_re = re.compile(r"link closed link=\S+ reason=(\w+)")
+    ansi_re = re.compile(r"\x1b\[[0-9;]*m")
 
     def link_closes(n: Node) -> Dict[str, int]:
         """Link closes by reason, from the node's own log so far (edge prints
@@ -1543,7 +1586,9 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
         counts: Dict[str, int] = {}
         try:
             for line in Path(n.log_path).read_text(errors="replace").splitlines():
-                m = close_re.search(line)
+                # The node log is colored (tracing's ANSI field styling), so the
+                # pattern is matched on the line with the escapes stripped.
+                m = close_re.search(ansi_re.sub("", line))
                 if m:
                     counts[m.group(1)] = counts.get(m.group(1), 0) + 1
         except OSError:
@@ -1558,6 +1603,10 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
             out[n.name] = {
                 "sent": (s.get("sent") or {}).get("frames"),
                 "publish_refused": (s.get("sent") or {}).get("publish_refused"),
+                "last_publish_error": (s.get("sent") or {}).get("last_publish_error"),
+                "frames_shrunk": (s.get("sent") or {}).get("frames_shrunk"),
+                "frame_budget_bytes": c.get("frame_budget_bytes"),
+                "legs": c.get("legs"),
                 "leg_sends": (s.get("sent") or {}).get("legs"),
                 "received": (s.get("received") or {}).get("frames"),
                 "by_publisher": (s.get("received") or {}).get("by_publisher"),
@@ -1599,6 +1648,9 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
         last = {n.name: (heard_from(n, capped), t_start) for n in nodes if n is not capped}
         gaps = {k: 0.0 for k in last}
         parents: Dict[str, List[Any]] = {k: [] for k in last}
+        # Frames heard at each poll, so a loss can be split into the first
+        # seconds of a phase and the steady state.
+        trace: Dict[str, List[Any]] = {k: [[0.0, last[k][0]]] for k in last}
         end = t_start + seconds
         while time.time() < end:
             time.sleep(1)
@@ -1610,6 +1662,9 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                 bp = (s.get("received") or {}).get("by_publisher") or {}
                 cnt = next((int(v.get("frames") or 0) for k, v in bp.items()
                             if k == capped_key or k.startswith(capped.key_id)), 0)
+                hist = next(((v.get("delay_hist") or {}).get("counts") for k, v in bp.items()
+                             if k == capped_key or k.startswith(capped.key_id)), None)
+                trace[n.name].append([round(time.time() - t_start, 1), cnt, hist])
                 prev_cnt, prev_t = last[n.name]
                 if cnt > prev_cnt:
                     last[n.name] = (cnt, now)
@@ -1618,7 +1673,48 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                 par = parent_of(n, s)
                 if not parents[n.name] or parents[n.name][-1][1] != par:
                     parents[n.name].append([round(now - t_start, 1), par])
+        step("trace", heard=trace)
         return {k: {"max_gap_s": round(v, 1), "parents": parents[k]} for k, v in gaps.items()}
+
+    def watch_pairs(seconds: float) -> Dict[str, Dict[str, Any]]:
+        """EVERY ordered pair from the moment streaming starts: how long until the
+        listener's first frame of that publisher, and the longest stretch with no
+        new frame, the opening one included. The ratio bar reads one publisher
+        only, so a third member's opening gap under edge 45.2.0's slow start (two
+        direct children first) was invisible for every other publisher."""
+        seen = {(p.name, l.name): 0 for p in nodes for l in nodes if p is not l}
+        mark = {k: stream_at[k[0]] for k in seen}
+        first: Dict[Any, Optional[float]] = {k: None for k in seen}
+        gap = {k: 0.0 for k in seen}
+        end = time.time() + seconds
+        while time.time() < end:
+            for l in nodes:
+                bp = (stats(l).get("received") or {}).get("by_publisher") or {}
+                now = time.time()
+                for p in nodes:
+                    if p is l:
+                        continue
+                    k = (p.name, l.name)
+                    key = p.node_key_id or p.key_id
+                    cnt = next((int(v.get("frames") or 0) for kk, v in bp.items()
+                                if kk == key or kk.startswith(p.key_id)), 0)
+                    gap[k] = max(gap[k], now - mark[k])
+                    if cnt > seen[k]:
+                        if first[k] is None:
+                            first[k] = now - stream_at[p.name]
+                        seen[k], mark[k] = cnt, now
+            time.sleep(0.2)
+        return {f"{p}->{l}": {"first_frame_s": None if first[(p, l)] is None else round(first[(p, l)], 1),
+                              "max_gap_s": round(gap[(p, l)], 1)} for p, l in seen}
+
+    def path_failed() -> Dict[str, List[str]]:
+        """Each node's media_path_failed events so far, as edge printed them."""
+        out = {}
+        for n in nodes:
+            ev = [str(e) for e in (stats(n).get("events") or []) if "MediaPathFailed" in str(e)]
+            if ev:
+                out[n.name] = ev
+        return out
 
     def ratios(before: Dict[str, Any], after: Dict[str, Any], seconds: float) -> Dict[str, Any]:
         r = {}
@@ -1638,29 +1734,65 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                 return int(v.get("frames") or 0)
         return 0
 
+    def heard_now() -> Dict[str, int]:
+        return {n.name: heard_from(n, capped) for n in nodes if n is not capped}
+
+    def ratio_of(b: Dict[str, int], a: Dict[str, int], seconds: float) -> Dict[str, Any]:
+        want = rate * seconds
+        return {k: {"got": a[k] - b[k], "expected": int(want), "ratio": round((a[k] - b[k]) / want, 3)}
+                for k in a}
+
     s0 = snapshot("start")
     t0 = time.time()
-    time.sleep(base_s)
+    pairs_base = watch_pairs(base_s)
     s1 = snapshot("baseline_end")
     r_base = ratios(s0, s1, time.time() - t0)
     step("heard_capped_publisher:baseline", **r_base)
+    failed_base = path_failed()
+    step("pairs:baseline", pairs=pairs_base, media_path_failed=failed_base)
     phases = {"baseline": r_base}
     gaps_cap: Dict[str, Any] = {}
     if capping:
         capped.netem("rate", f"{cap_kbit}kbit", "limit", "1000")
         t1 = time.time()
         step("cap_on", node=capped.name, kbit=cap_kbit)
+        # The capped node's own qdisc, once a second (edge 2026-11-25: the N=6
+        # diagnosis could not see the kernel queue's drops or backlog).
+        qd_series: List[Any] = []
+        qd_stop = threading.Event()
+
+        def sample_qdisc() -> None:
+            while not qd_stop.is_set():
+                qd_series.append([round(time.time() - t1, 1), capped.qdisc_stats()])
+                qd_stop.wait(1.0)
+
+        qd_thread = threading.Thread(target=sample_qdisc, daemon=True)
+        qd_thread.start()
+        c1 = heard_now()
+        t1c = time.time()
         gaps_cap = watch(cap_s)
+        # Counted on the listeners, which are not capped, and the cap is lifted
+        # before any node is asked for its full snapshot: the capped node's API
+        # and metrics ride its capped uplink, so asking it under the cap both
+        # lengthens the phase and takes bandwidth from the call.
+        c2 = heard_now()
+        t2c = time.time()
+        qd_stop.set()
+        qd_thread.join(timeout=5)
+        step("qdisc", node=capped.name, series=qd_series)
+        capped.netem_lift()
+        t2 = time.time()
+        step("cap_off", node=capped.name, capped_seconds=round(t2 - t1, 1))
         s2 = snapshot("cap_end")
-        r_cap = ratios(s1, s2, time.time() - t1)
+        r_cap = ratio_of(c1, c2, t2c - t1c)
         step("heard_capped_publisher:capped", **r_cap, gaps=gaps_cap)
         phases["capped"] = r_cap
-        capped.netem()
-        t2 = time.time()
-        step("cap_off", node=capped.name)
-        gaps_lift = watch(lift_s)
+        gaps_lift = watch(max(1.0, lift_s - (time.time() - t2)))
+        c4 = heard_now()
+        t4c = time.time()
         s3 = snapshot("lift_end")
-        r_lift = ratios(s2, s3, time.time() - t2)
+        capped.netem()
+        r_lift = ratio_of(c2, c4, t4c - t2c)  # from the lift itself, the snapshot included
         step("heard_capped_publisher:lifted", **r_lift, gaps=gaps_lift)
         phases["lifted"] = r_lift
     else:
@@ -1676,6 +1808,13 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
     auth = {n.name: (s3.get(n.name) or {}).get("chunk_auth") for n in nodes}
     failures = [f"{ph}:{k}" for ph, rs in phases.items() if ph != "capped"
                 for k, v in rs.items() if v["ratio"] < 0.99]
+    # Uncapped, nobody may go unheard and no path may be called failed, whoever
+    # relays. AV_BASE_MAX_GAP_S is edge's 1 s per-pair
+    # bound (edge 2026-11-25) plus this poll's slack: 0.2 s and one stats call per node.
+    failures += [f"baseline:{k}:{'never_heard' if v['first_frame_s'] is None else 'gap_%ss' % v['max_gap_s']}"
+                 for k, v in pairs_base.items()
+                 if v["first_frame_s"] is None or v["max_gap_s"] > base_max_gap]
+    failures += [f"baseline:{k}:media_path_failed" for k in failed_base]
     if "capped" in phases:
         if cap_min > 0:
             failures += [f"capped:{k}:ratio" for k, v in phases["capped"].items() if v["ratio"] < cap_min]
@@ -1690,14 +1829,18 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
             before = (s1.get(name) or {}).get("link_closes") or {}
             after = (s2.get(name) or {}).get("link_closes") or {}
             torn = after.get("ChannelExhausted", 0) - before.get("ChannelExhausted", 0)
-            if torn > 0:
-                failures.append(f"capped:{name}:links_torn_down_ChannelExhausted:{torn}")
+            # The node log shows a repeated line three times and then sums it
+            # (ciris_server::log_dedup), so `torn` is a LOWER bound, and three
+            # seen before the cap would hide every later one.
+            if torn > 0 or before.get("ChannelExhausted", 0) >= 3:
+                failures.append(f"capped:{name}:links_torn_down_ChannelExhausted:at_least_{max(torn, 1)}")
     verdict = "PASS" if not failures else "FAIL"
     record = {"scenario": "av_mesh", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "versions": _versions(), "docker": bool(mesh.docker), "members": n_members,
               "relay": relay, "rate_hz": rate, "frame_bytes": size, "cap_kbit": cap_kbit if capping else None,
               "phase_seconds": {"base": base_s, "cap": cap_s if capping else 0, "lift": lift_s if capping else 0},
               "heard_capped_publisher": phases, "gaps_while_capped": gaps_cap,
+              "pairs_baseline": pairs_base, "media_path_failed_baseline": failed_base,
               "capped_publisher_legs_at_end": legs_capped, "alm": alm, "chunk_auth": auth,
               "placed": placed, "verdict": verdict, "failures": failures}
     path = _evidence(record, "av_mesh")
@@ -1708,6 +1851,12 @@ AV MESH — {n_members} members, relay={'on' if relay else 'off'}, all publishin
                   nodes, r"alm|shed|relay|offer|call")
         rec["first_failure"] = step.first_failure
     return rec
+
+
+def _video_fill(n: int) -> bytes:
+    """A deterministic video-class payload of n bytes (its first 8 carry a
+    sequence number the receiver ignores)."""
+    return bytes((i * 31 + 7) & 0xFF for i in range(n))
 
 
 def av_member(mesh: Mesh, args: Any) -> Record:
@@ -1731,6 +1880,10 @@ AV MEMBER — the production call routes, frames socket and events.
   SPLIT_HOME=1: both nodes boot split, as an agent install does. AV_VIDEO=1: join with video.""")
     split = _split_home(mesh)
     video = os.environ.get("AV_VIDEO") == "1"
+    # AV_VIDEO_BYTES=N (with AV_VIDEO=1): also send a 10 fps AV1-class (0x01)
+    # frame of N bytes, far over one chunk, so it must be split and rejoined
+    # (0.5.254: a video join's stream is bound to a codec map and FRAMED).
+    vbytes = int(os.environ.get("AV_VIDEO_BYTES", "0")) if video else 0
     a = mesh.add("alice")
     b = mesh.add("bob")
     if split and not _split_held(step, [a, b]):
@@ -1768,6 +1921,7 @@ AV MEMBER — the production call routes, frames socket and events.
          visible_to_watcher=(gs or {}).get("visible_to_watcher"))
 
     received = {"alice": {}, "bob": {}}
+    vrecv = {"alice": {"frames": 0, "intact": 0, "sizes": set()}, "bob": {"frames": 0, "intact": 0, "sizes": set()}}
     events = {"alice": [], "bob": []}
     socks = {}
 
@@ -1780,6 +1934,15 @@ AV MEMBER — the production call routes, frames socket and events.
             if op == websocket.ABNF.OPCODE_BINARY:
                 pl = struct.unpack(">H", data[5:7])[0]
                 pub = data[7:7 + pl].decode()
+                if data[1] == 0x01:
+                    # node_to_client header: 7 + pub_len + 32 + 8 + 8 + 8 + 1 + 4.
+                    payload = data[7 + pl + 61:]
+                    v = vrecv[name]
+                    v["frames"] += 1
+                    v["sizes"].add(len(payload))
+                    if len(payload) == vbytes and payload[8:] == _video_fill(vbytes)[8:]:
+                        v["intact"] += 1
+                    continue
                 received[name][pub] = received[name].get(pub, 0) + 1
             elif op == websocket.ABNF.OPCODE_TEXT:
                 events[name].append(json.loads(data))
@@ -1819,12 +1982,18 @@ AV MEMBER — the production call routes, frames socket and events.
     step("legs_formed", seconds=round(time.time() - t_leg, 2))
     frame = bytes([1, 0xFF, 0, 0, 0]) + opus
     sent = {"alice": 0, "bob": 0}
+    vsent = {"alice": 0, "bob": 0}
     t0 = time.time()
     tick = 0
     while time.time() - t0 < secs:
         for name, ws in socks.items():
             ws.send_binary(frame)
             sent[name] += 1
+            if vbytes and tick % 5 == 0:
+                body = bytearray(_video_fill(vbytes))
+                body[:8] = vsent[name].to_bytes(8, "big")
+                ws.send_binary(bytes([1, 0x01, 0, 0, 0]) + bytes(body))
+                vsent[name] += 1
         tick += 1
         nxt = t0 + tick * 0.02
         time.sleep(max(0.0, nxt - time.time()))
@@ -1841,6 +2010,10 @@ AV MEMBER — the production call routes, frames socket and events.
          bob_sent=sent["bob"], alice_heard_bob=heard("alice", b_key), ratio_alice=round(ratio_ba, 3),
          received_keys={k: list(v) for k, v in received.items()},
          refusals={k: [e for e in v if e.get("type") == "publish_refused"][:3] for k, v in events.items()})
+    if vbytes:
+        step("video_heard", bytes=vbytes, sent=vsent,
+             received={k: {"frames": v["frames"], "intact": v["intact"], "sizes": sorted(v["sizes"])[:5]}
+                       for k, v in vrecv.items()})
     _, left = b.api("DELETE", f"/v1/chat/{room}/call")
     step("bob_left", answer=left)
     wait_for("alice to see attendee_left", lambda: True if any(
@@ -1860,8 +2033,16 @@ AV MEMBER — the production call routes, frames socket and events.
               "versions": _versions(), "seconds": secs, "frame_bytes": len(frame),
               "sent": sent, "ratio": {"bob_from_alice": round(ratio_ab, 4), "alice_from_bob": round(ratio_ba, 4)},
               "features": feats}
+    video_ok = True
+    if vbytes:
+        r_ab = vrecv["bob"]["intact"] / max(1, vsent["alice"])
+        r_ba = vrecv["alice"]["intact"] / max(1, vsent["bob"])
+        record["video"] = {"bytes": vbytes, "sent": vsent,
+                           "intact_ratio": {"bob_from_alice": round(r_ab, 4), "alice_from_bob": round(r_ba, 4)}}
+        video_ok = r_ab >= 0.95 and r_ba >= 0.95
     ok = (ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
-          and left_ev.get("person") == b.owner_key_id and ready_ev.get("fragmenting") is False)
+          and left_ev.get("person") == b.owner_key_id and ready_ev.get("fragmenting") is video
+          and video_ok)
     record["verdict"] = "PASS" if ok else "FAIL"
     _evidence(record, "av_member")
     if not ok:
