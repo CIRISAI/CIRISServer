@@ -38,6 +38,7 @@ import shutil
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -92,10 +93,66 @@ def private_jar(jar: Path, home: Path) -> Path:
                     old.unlink()
                 except OSError:
                     pass  # An older UI is still running from it.
+        copy_class_path(jar, dest_dir, Path(home))
         return dest
     except OSError as e:
         print(f"ciris_server.upgrade: running the JAR in place ({e})", file=sys.stderr)
         return jar
+
+
+def manifest_class_path(jar: Path) -> List[str]:
+    """The ``Class-Path`` entries of ``jar``'s manifest (72-byte lines, a leading
+    space continues the previous one). Empty when there is none."""
+    try:
+        with zipfile.ZipFile(jar) as z:
+            text = z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return []
+    lines: List[str] = []
+    for raw in text.splitlines():
+        if raw.startswith(" ") and lines:
+            lines[-1] += raw[1:]
+        else:
+            lines.append(raw)
+    for line in lines:
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "class-path":
+            return value.split()
+    return []
+
+
+def copy_class_path(jar: Path, dest_dir: Path, home: Path) -> List[Path]:
+    """Copy what ``jar``'s manifest Class-Path names, relative to the jar, to the
+    same place relative to its private copy in ``dest_dir``. The desktop jar finds
+    FFmpeg as ``../../ciris_holon/media/jars/…``: copied alone, those resolve
+    under ``home`` to nothing, the JVM skips a missing entry silently, and a call
+    has no video either way (client 2026-11-27). Only entries that land inside
+    ``home`` are copied, and a missing source is skipped (the in-place jar would
+    miss it too). Returns the copies made or already current."""
+    out: List[Path] = []
+    home_r = home.resolve()
+    for entry in manifest_class_path(jar):
+        if ":" in entry or entry.startswith("/"):
+            continue  # absolute or a URL scheme: not relative to the jar
+        src = (jar.parent / entry).resolve()
+        dst = (dest_dir / entry).resolve()
+        if not src.is_file() or home_r not in dst.parents:
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+                tmp = dst.with_suffix(f".{os.getpid()}.tmp")
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, dst)
+            out.append(dst)
+            sums = src.parent / "SHA256SUMS"
+            if sums.is_file():
+                shutil.copyfile(sums, dst.parent / "SHA256SUMS")
+        except OSError as e:
+            # A running UI holds the current copy (same size: not reached). A
+            # failure here costs video, not the UI.
+            print(f"ciris_server.upgrade: class path {entry}: {e}", file=sys.stderr)
+    return out
 
 
 def dist_versions(site: Path) -> Dict[str, str]:

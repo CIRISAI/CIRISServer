@@ -733,14 +733,9 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
-    # THE CALLS CUT (edge 45.2.0, 0.5.254): a shaped-only device's call refusal.
-    # Queued for the client bundle with its English, beside the built ids the
-    # guard cannot see (call.end.*, call.media_path_failed.<cause>,
-    # call.relay_standing.<relay>; tests/vectors/call_frames_v1.json).
-    "call.shaped_only",
-    # The four-person call limit (Eric 2026-11-25, edge 45.2.0): the join refusal
-    # and the call_ended reason. Queued for the client bundle with its English.
-    "call.full",
+    # PAID AT CLIENT 0.5.243 (2026-11-27, for 0.5.255): call.shaped_only (a
+    # shaped-only device's call refusal) and call.full (the four-person call
+    # limit); the floor in pyproject.toml is 0.5.243.
     # PAID AT CLIENT 0.5.242 (2026-11-26, for 0.5.254): the image-rendition,
     # share, takedown and room_full ids below, ten in all; the floor in
     # pyproject.toml is 0.5.242.

@@ -50,6 +50,31 @@ class Jars(Base):
         self.assertEqual(second.read_bytes(), b"newer")
         self.assertFalse(first.exists(), "the older private copy is removed")
 
+    def test_the_class_path_comes_with_the_private_copy(self):
+        import zipfile
+
+        # The installed layout: the jar two levels under site-packages, FFmpeg in
+        # ciris_holon/media/jars, named relative to the jar by its manifest.
+        jar_dir = self.site / "ciris_client" / "_artifacts"
+        jar_dir.mkdir(parents=True)
+        media = self.site / "ciris_holon" / "media" / "jars"
+        media.mkdir(parents=True)
+        (media / "ffmpeg-7-linux.jar").write_bytes(b"ffmpeg")
+        (media / "SHA256SUMS").write_text("x  ffmpeg-7-linux.jar\n")
+        names = "../../ciris_holon/media/jars/ffmpeg-7-linux.jar ../../ciris_holon/media/jars/javacpp-1-linux.jar"
+        manifest = "Manifest-Version: 1.0\r\nClass-Path: " + names[:58] + "\r\n " + names[58:] + "\r\n\r\n"
+        jar = jar_dir / "CIRIS-3.0.jar"
+        with zipfile.ZipFile(jar, "w") as z:
+            z.writestr("META-INF/MANIFEST.MF", manifest)
+        self.assertEqual(upgrade.manifest_class_path(jar), names.split())
+        home = self.site / "home"
+        run = upgrade.private_jar(jar, home)
+        got = (run.parent / "../../ciris_holon/media/jars/ffmpeg-7-linux.jar").resolve()
+        self.assertEqual(got.read_bytes(), b"ffmpeg", "FFmpeg resolves from the private copy")
+        self.assertTrue((got.parent / "SHA256SUMS").is_file())
+        # javacpp is missing from the install: skipped, not invented.
+        self.assertFalse((got.parent / "javacpp-1-linux.jar").exists())
+
 
 class Watcher(Base):
     def test_a_tilde_dir_or_a_changed_version_is_an_upgrade(self):

@@ -2867,7 +2867,7 @@ fn is_stale(
 }
 
 /// The newest row held here that the person or one of their devices signed.
-async fn last_heard_from(
+pub(crate) async fn last_heard_from(
     engine: &Engine,
     person: &str,
     occurrences: &[String],

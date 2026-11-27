@@ -383,6 +383,62 @@ async fn people_of(engine: &Engine, members: &[String]) -> serde_json::Value {
     serde_json::Value::Array(out)
 }
 
+/// Whether each other member of `room` can be heard from, as THIS node sees it:
+/// a warning for "you are calling someone whose device is offline", never a
+/// refusal. One entry per member NODE (a person with two devices has two):
+/// `{member, person, in_call, last_heard_ms_ago, reachable_now}`.
+/// `last_heard_ms_ago` is the newest row held here that the node or its person
+/// signed (null: none held). `reachable_now` is edge's live reach reading
+/// (CIRISEdge 45.3 `peer_reach`); until the node runs on it, null = unknown.
+pub async fn reach_view(engine: &Engine, room: &str, attendees: &[String]) -> serde_json::Value {
+    let Some(me) = crate::node_key::wire_identity().map(str::to_owned) else {
+        return json!({ "view": "this_node", "members": [] });
+    };
+    let members = match crate::mls_state::groups_for(&me).open_existing(room).await {
+        Ok(Some(g)) => g.member_key_ids().await,
+        _ => Vec::new(),
+    };
+    let now = chrono::Utc::now();
+    let mut out = Vec::new();
+    for m in members.iter().filter(|m| **m != me) {
+        let person = person_of(engine, m).await;
+        let others: Vec<String> = person.iter().cloned().collect();
+        let heard = crate::contacts_chat::last_heard_from(engine, m, &others).await;
+        let ago = heard.map(|at| u64::try_from((now - at).num_milliseconds()).unwrap_or(0));
+        out.push(json!({
+            "member": m,
+            "person": person,
+            "in_call": attendees.contains(m),
+            "last_heard_ms_ago": ago,
+            "reachable_now": serde_json::Value::Null,
+        }));
+    }
+    json!({ "view": "this_node", "members": out })
+}
+
+/// How long after the socket opens, with no `ready`, `connecting` is sent again.
+pub const CONNECTING_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `{type: connecting, members, since_ms, reach}`: `members` are the room's
+/// other member nodes (who the call waits on), `since_ms` the unix ms the
+/// socket opened.
+async fn connecting_json(
+    engine: &Engine,
+    room: &str,
+    attendees: &[String],
+    since_ms: i64,
+) -> serde_json::Value {
+    connecting_from(reach_view(engine, room, attendees).await, since_ms)
+}
+
+fn connecting_from(reach: serde_json::Value, since_ms: i64) -> serde_json::Value {
+    let members: Vec<serde_json::Value> = reach["members"]
+        .as_array()
+        .map(|a| a.iter().map(|m| m["member"].clone()).collect())
+        .unwrap_or_default();
+    json!({ "type": "connecting", "members": members, "since_ms": since_ms, "reach": reach })
+}
+
 /// Add `person` beside `member` on an event that names one.
 async fn with_person(engine: &Engine, mut v: serde_json::Value) -> serde_json::Value {
     if let Some(m) = v
@@ -690,14 +746,17 @@ async fn join_view(
         "video_max_people": VIDEO_MAX_PEOPLE,
         "room": room,
         "already_joined": already,
-        "call_id": format!("{:?}", call.id()),
+        "call_id": hex::encode(call.id().0),
         "stream_id": hex::encode(call.stream().0),
         "epoch": call.epoch().await.0,
         "video": video,
+        // null until a leg is up; the socket's `ready` carries it then.
         "frame_budget_bytes": call.chunk_plaintext_budget(),
-        "service_tier": format!("{:?}", call.service_tier()),
+        "service_tier": call.service_tier().token(),
+        "state": state_view(&call.state()),
         "attendees": attendees,
         "attendee_people": people,
+        "reach": reach_view(engine, room, &attendees).await,
         "legs": call.legs(),
         "relay": relay_view(engine, call, is_serve_seat(engine).await).await,
         "frames_socket": format!("/v1/chat/{room}/call/frames"),
@@ -834,10 +893,11 @@ async fn state(
             match g.as_ref() {
                 Some(c) => Some(json!({
                     "attendee_people": people_of(&st.engine, &c.attendees().await).await,
+                    "reach": reach_view(&st.engine, &room, &c.attendees().await).await,
                     "stream_id": hex::encode(c.stream().0),
-                    "state": format!("{:?}", c.state()),
+                    "state": state_view(&c.state()),
                     "frame_budget_bytes": c.chunk_plaintext_budget(),
-                    "service_tier": format!("{:?}", c.service_tier()),
+                    "service_tier": c.service_tier().token(),
                     "attendees": c.attendees().await,
                     "legs": c.legs(),
                     "relay": relay_view(&st.engine, c, is_serve_seat(&st.engine).await).await,
@@ -1169,6 +1229,21 @@ pub fn end_ids(cause: &EndCause) -> (&'static str, &'static str) {
 }
 
 /// The `call_ended` socket event.
+/// A call's state as tokens: `{state: "live"}`, `{state: "degraded", epoch,
+/// reason}` or `{state: "ended", ended, reason_id}` (the `call_ended` ids).
+pub fn state_view(state: &EdgeCallState) -> serde_json::Value {
+    match state {
+        EdgeCallState::Live => json!({ "state": "live" }),
+        EdgeCallState::Degraded { epoch, reason } => {
+            json!({ "state": "degraded", "epoch": epoch, "reason": reason })
+        }
+        EdgeCallState::Ended(cause) => {
+            let (token, id) = end_ids(cause);
+            json!({ "state": "ended", "ended": token, "reason_id": id })
+        }
+    }
+}
+
 pub fn ended_json(cause: &EndCause) -> serde_json::Value {
     let (token, id) = end_ids(cause);
     json!({ "type": "call_ended", "ended": token, "reason_id": id })
@@ -1333,15 +1408,48 @@ async fn pump(
     // again when the budget changes; `attendee_left {left: "lost"}` when a
     // member's leg has been gone for 5 s (edge's Down bound at depth 0; a failover can
     // take a leg for over 2 s). A client publishes only after `ready`.
+    //
+    // `connecting {members, since_ms, reach}` when the socket opens, and once
+    // more if no `ready` has come CONNECTING_AGAIN_AFTER later: who the call is
+    // waiting on and whether this node has heard from them (`reach_view`), so
+    // a client can say "Francesco's device hasn't been seen since…" instead of
+    // ringing silently. A warning; the call carries on.
     let jw = Arc::clone(&j);
     let out_w = out_tx.clone();
     let eng_w = Arc::clone(&engine);
+    let room_w = room.clone();
     let watch_task = tokio::spawn(async move {
+        let since_ms = chrono::Utc::now().timestamp_millis();
+        let opened = std::time::Instant::now();
+        let mut connecting_sent: u8 = 0;
         let mut last_budget: Option<usize> = None;
         let mut legs_seen: HashMap<String, Option<std::time::Instant>> = HashMap::new();
         let mut last_video: Option<bool> = None;
         let mut tick: u32 = 0;
         loop {
+            let due = match connecting_sent {
+                0 => true,
+                1 => last_budget.is_none() && opened.elapsed() >= CONNECTING_AGAIN_AFTER,
+                _ => false,
+            };
+            if due {
+                connecting_sent += 1;
+                let attendees = {
+                    let g = jw.call.lock().await;
+                    match g.as_ref() {
+                        Some(c) => c.attendees().await,
+                        None => break,
+                    }
+                };
+                let m = connecting_json(&eng_w, &room_w, &attendees, since_ms).await;
+                if out_w
+                    .send(Message::Text(m.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             // Once a second: how many people are in the call (VIDEO_MAX_PEOPLE).
             if tick % 4 == 0 {
@@ -2079,6 +2187,43 @@ mod tests {
         assert_eq!(signed_end("backgrounded"), SignedEnd::Backgrounded);
         assert_eq!(signed_end("left"), SignedEnd::Left);
         assert_eq!(signed_end("lost"), SignedEnd::Left);
+    }
+
+    /// The call's state, tier and the `connecting` event are tokens and
+    /// shapes the client pins, never Rust Debug strings.
+    #[test]
+    fn call_state_and_connecting_are_tokens() {
+        assert_eq!(state_view(&EdgeCallState::Live), json!({ "state": "live" }));
+        let d = state_view(&EdgeCallState::Degraded {
+            epoch: 3,
+            reason: "r".into(),
+        });
+        assert_eq!(d, json!({ "state": "degraded", "epoch": 3, "reason": "r" }));
+        let e = state_view(&EdgeCallState::Ended(EndCause::HungUp));
+        assert_eq!(
+            e,
+            json!({ "state": "ended", "ended": "hung_up", "reason_id": "call.end.hung_up" })
+        );
+        assert_eq!(ciris_edge::ServiceTier::FullOps.token(), "load_tier:0");
+
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/call_frames_v1.json"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pinned = v["events"]["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["type"] == "connecting")
+            .unwrap()
+            .clone();
+        let built = connecting_from(pinned["reach"].clone(), 1_795_000_000_000);
+        assert_eq!(
+            built, pinned,
+            "the server builds the pinned connecting event"
+        );
     }
 
     /// Every way a call ends has its token and copy key, and the vectors the
