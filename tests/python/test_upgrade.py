@@ -75,6 +75,26 @@ class Jars(Base):
         # javacpp is missing from the install: skipped, not invented.
         self.assertFalse((got.parent / "javacpp-1-linux.jar").exists())
 
+        # The doctor resolves the copy the launcher runs: ffmpeg OK, javacpp FAIL.
+        rows = {r["entry"].rsplit("/", 1)[-1]: r["ok"] for r in upgrade.check_class_path(run)}
+        self.assertEqual(rows, {"ffmpeg-7-linux.jar": True, "javacpp-1-linux.jar": False})
+        rep = upgrade.doctor(site=self.site, home=home, probe_pythons=False)
+        self.assertFalse(rep.healthy, "a Class-Path entry the JVM cannot find is a FAIL")
+
+        # The holon jars' version moves: the old copy goes, the new one lands.
+        (media / "ffmpeg-7-linux.jar").rename(media / "ffmpeg-8-linux.jar")
+        names8 = names.replace("ffmpeg-7", "ffmpeg-8")
+        jar8 = jar_dir / "CIRIS-4.0.jar"
+        with zipfile.ZipFile(jar8, "w") as z:
+            z.writestr("META-INF/MANIFEST.MF", "Manifest-Version: 1.0\r\nClass-Path: " + names8 + "\r\n\r\n")
+        upgrade.private_jar(jar8, home)
+        self.assertTrue((got.parent / "ffmpeg-8-linux.jar").is_file())
+        self.assertFalse(got.exists(), "the old holon copy is removed when the version moves")
+
+    def test_pythons_on_path_lists_this_interpreter(self):
+        rows = upgrade.pythons_on_path()
+        self.assertTrue(all("executable" in r and "agent" in r for r in rows))
+
 
 class Watcher(Base):
     def test_a_tilde_dir_or_a_changed_version_is_an_upgrade(self):
@@ -115,16 +135,16 @@ class Doctor(Base):
         (self.site / "ciris_server").mkdir()
         (self.site / "ciris_server" / "__init__.py").touch()
         dist(self.site, "ciris_server", "0.5.244", ["ciris_server/__init__.py"])
-        self.assertTrue(upgrade.doctor(site=self.site).healthy)
+        self.assertTrue(upgrade.doctor(site=self.site, home=self.site / 'nohome', probe_pythons=False).healthy)
 
     def test_the_half_install_from_the_field_is_named_and_repaired(self):
         self.half_install()
-        seen = upgrade.doctor(site=self.site)
+        seen = upgrade.doctor(site=self.site, home=self.site / 'nohome', probe_pythons=False)
         self.assertFalse(seen.healthy)
         self.assertIn("ciris_agent", seen.half_installed)
         self.assertEqual(len(seen.tilde), 2)
         self.assertTrue((self.site / "~iris_engine").exists(), "report only: nothing touched")
-        fixed = upgrade.doctor(repair=True, site=self.site)
+        fixed = upgrade.doctor(repair=True, site=self.site, home=self.site / 'nohome', probe_pythons=False)
         self.assertFalse(list(self.site.glob("~iris*")))
         self.assertIn("--force-reinstall", fixed.pip_command)
         self.assertIn("ciris-agent", fixed.pip_command)
@@ -132,7 +152,7 @@ class Doctor(Base):
     def test_a_file_missing_from_record_is_half_installed(self):
         (self.site / "ciris_server").mkdir()
         dist(self.site, "ciris_server", "0.5.244", ["ciris_server/gone.py"])
-        self.assertIn("ciris_server", upgrade.doctor(site=self.site).half_installed)
+        self.assertIn("ciris_server", upgrade.doctor(site=self.site, home=self.site / 'nohome', probe_pythons=False).half_installed)
 
     def test_stale_jars_keep_the_newest(self):
         app = self.site / "ciris_engine" / "desktop_app"
@@ -140,7 +160,7 @@ class Doctor(Base):
         for v in ("2.18.0", "2.19.1"):
             (app / f"CIRIS-windows-x64-{v}.jar").touch()
         dist(self.site, "ciris_agent", "2.19.1")
-        upgrade.doctor(repair=True, site=self.site)
+        upgrade.doctor(repair=True, site=self.site, home=self.site / 'nohome', probe_pythons=False)
         self.assertEqual([p.name for p in app.iterdir()], ["CIRIS-windows-x64-2.19.1.jar"])
 
 
