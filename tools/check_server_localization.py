@@ -733,6 +733,10 @@ def _server_message_texts_all(root: Path) -> Dict[str, List[str]]:
 # `src/operator_surface.rs`, on a surface that advertises `source_locale` and
 # could not honour it.
 KNOWN_UNLOCALIZED: Tuple[str, ...] = (
+    # RINGING (0.5.255, src/call_ring.rs): the decline route's refusal of a
+    # reason other than declined|busy. Queued for client 0.5.244 with its
+    # English ("That isn't a reason for declining a call.").
+    "call.decline_reason_unknown",
     # PAID AT CLIENT 0.5.243 (2026-11-27, for 0.5.255): call.shaped_only (a
     # shaped-only device's call refusal) and call.full (the four-person call
     # limit); the floor in pyproject.toml is 0.5.243.
