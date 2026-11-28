@@ -122,8 +122,10 @@ requires-python = ">=3.10"
 # moderation.nothing_to_take_down, moderation.takedown_failed,
 # moderation.takedown_needs_reason, community.room_full), so they leave
 # KNOWN_UNLOCALIZED. call.full and call.shaped_only stay queued for 0.5.243.
+# FLOOR 0.5.243 (2026-11-27, for 0.5.255): the first client whose bundle
+# carries call.full and call.shaped_only, so they leave KNOWN_UNLOCALIZED.
 dependencies = [
-    "ciris-client>=0.5.242,<0.6",
+    "ciris-client>=0.5.243,<0.6",
 ]
 
 [project.urls]

@@ -640,7 +640,10 @@ pub async fn declared(engine: &Arc<Engine>) -> DeclaredConformance {
         wire_vocabulary_sha256: wire_vocabulary_sha256(),
         declared_by_config,
         capabilities: capabilities.clone(),
-        features: vec![crate::call_routes::FEATURE.to_owned()],
+        features: vec![
+            crate::call_routes::FEATURE.to_owned(),
+            crate::call_routes::FEATURE_RING.to_owned(),
+        ],
     };
     match crate::graph_config::get_config(engine, KEY_CONFORMANCE_PROFILES).await {
         Ok(None) => base(build.clone(), false),

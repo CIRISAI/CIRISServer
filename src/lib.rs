@@ -79,6 +79,7 @@ pub mod attestation_reads;
 /// accord-holder registry + the 2-of-3 invocation kill-switch (the safe-mesh
 /// floor that gates cutting 0.6 / bootstrapping the canonical mesh).
 pub mod call_frames;
+pub mod call_ring;
 pub mod call_routes;
 pub mod qa_call;
 

@@ -35,9 +35,11 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import time
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
@@ -92,10 +94,141 @@ def private_jar(jar: Path, home: Path) -> Path:
                     old.unlink()
                 except OSError:
                     pass  # An older UI is still running from it.
+        copy_class_path(jar, dest_dir, Path(home))
         return dest
     except OSError as e:
         print(f"ciris_server.upgrade: running the JAR in place ({e})", file=sys.stderr)
         return jar
+
+
+def manifest_class_path(jar: Path) -> List[str]:
+    """The ``Class-Path`` entries of ``jar``'s manifest (72-byte lines, a leading
+    space continues the previous one). Empty when there is none."""
+    try:
+        with zipfile.ZipFile(jar) as z:
+            text = z.read("META-INF/MANIFEST.MF").decode("utf-8", "replace")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return []
+    lines: List[str] = []
+    for raw in text.splitlines():
+        if raw.startswith(" ") and lines:
+            lines[-1] += raw[1:]
+        else:
+            lines.append(raw)
+    for line in lines:
+        key, _, value = line.partition(":")
+        if key.strip().lower() == "class-path":
+            return value.split()
+    return []
+
+
+def copy_class_path(jar: Path, dest_dir: Path, home: Path) -> List[Path]:
+    """Copy what ``jar``'s manifest Class-Path names, relative to the jar, to the
+    same place relative to its private copy in ``dest_dir``. The desktop jar finds
+    FFmpeg as ``../../ciris_holon/media/jars/…``: copied alone, those resolve
+    under ``home`` to nothing, the JVM skips a missing entry silently, and a call
+    has no video either way (client 2026-11-27). Only entries that land inside
+    ``home`` are copied, and a missing source is skipped (the in-place jar would
+    miss it too). Returns the copies made or already current."""
+    out: List[Path] = []
+    home_r = home.resolve()
+    for entry in manifest_class_path(jar):
+        if ":" in entry or entry.startswith("/"):
+            continue  # absolute or a URL scheme: not relative to the jar
+        src = (jar.parent / entry).resolve()
+        dst = (dest_dir / entry).resolve()
+        if not src.is_file() or home_r not in dst.parents:
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if not dst.exists() or dst.stat().st_size != src.stat().st_size:
+                tmp = dst.with_suffix(f".{os.getpid()}.tmp")
+                shutil.copyfile(src, tmp)
+                os.replace(tmp, dst)
+            out.append(dst)
+            sums = src.parent / "SHA256SUMS"
+            if sums.is_file():
+                shutil.copyfile(sums, dst.parent / "SHA256SUMS")
+        except OSError as e:
+            # A running UI holds the current copy (same size: not reached). A
+            # failure here costs video, not the UI.
+            print(f"ciris_server.upgrade: class path {entry}: {e}", file=sys.stderr)
+    # Older copies: a JAR in a directory we copy into that the current
+    # Class-Path no longer names (the holon jars' version moved). A running
+    # UI may hold one open; it goes next time.
+    keep = set(out)
+    for d in {p.parent for p in out}:
+        for old in d.glob("*.jar"):
+            if old.resolve() not in keep:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    return out
+
+
+def check_class_path(jar: Path) -> List[Dict[str, object]]:
+    """Resolve ``jar``'s manifest Class-Path the way the JVM does, relative to
+    the jar: one ``{entry, path, ok}`` per relative entry. A missing entry is
+    what the JVM skips without a word (calls with no video)."""
+    rows: List[Dict[str, object]] = []
+    for entry in manifest_class_path(jar):
+        if ":" in entry or entry.startswith("/"):
+            continue
+        path = (jar.parent / entry).resolve()
+        rows.append({"entry": entry, "path": str(path), "ok": path.is_file()})
+    return rows
+
+
+def desktop_run_jar(home: Path) -> Optional[Path]:
+    """The JAR the desktop launcher runs: the newest private copy under
+    ``home/runtime/desktop``, if any."""
+    return newest_jar((Path(home) / "runtime" / "desktop").glob("*.jar"))
+
+
+_PROBE = (
+    "import json,sys\n"
+    "from importlib import metadata as m\n"
+    "def v(n):\n"
+    "    try:\n"
+    "        return m.version(n)\n"
+    "    except Exception:\n"
+    "        return None\n"
+    "print(json.dumps({'executable': sys.executable, 'agent': v('ciris-agent'),"
+    " 'server': v('ciris-server'), 'client': v('ciris-client')}))"
+)
+
+
+def pythons_on_path() -> List[Dict[str, object]]:
+    """Every Python on PATH (and the Windows `py` launcher's list), with the
+    CIRIS versions each one has installed. Two Pythons with CIRIS in them is how
+    an upgrade lands in one while the other keeps running (2026-11-27)."""
+    names = ["python3", "python"] + [f"python3.{n}" for n in range(9, 15)]
+    seen: Dict[str, Dict[str, object]] = {}
+    candidates: List[str] = []
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        for n in names:
+            for suffix in ("", ".exe"):
+                c = Path(d) / (n + suffix)
+                if c.is_file():
+                    candidates.append(str(c))
+    if os.name == "nt" and shutil.which("py"):
+        try:
+            listed = subprocess.run(["py", "-0p"], capture_output=True, text=True, timeout=10).stdout
+            candidates += [ln.split()[-1] for ln in listed.splitlines() if ln.strip().endswith(".exe")]
+        except (OSError, subprocess.SubprocessError):
+            pass
+    for c in candidates:
+        try:
+            r = subprocess.run([c, "-c", _PROBE], capture_output=True, text=True, timeout=15)
+            row = json.loads(r.stdout.strip().splitlines()[-1])
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            continue
+        key = os.path.normcase(os.path.realpath(str(row["executable"])))
+        if key not in seen:
+            row["on_path_as"] = c
+            seen[key] = row
+    return list(seen.values())
 
 
 def dist_versions(site: Path) -> Dict[str, str]:
@@ -168,13 +301,29 @@ class DoctorReport:
     #: names files that are gone.
     half_installed: Dict[str, str] = field(default_factory=dict)
     stale_jars: List[str] = field(default_factory=list)
+    #: The desktop JAR's manifest Class-Path as the JVM resolves it from the copy
+    #: the launcher runs; an entry with ``ok: false`` means calls have no video.
+    class_path: List[Dict[str, object]] = field(default_factory=list)
+    #: Every Python on PATH and the CIRIS it holds (shown, not judged).
+    pythons: List[Dict[str, object]] = field(default_factory=list)
     removed: List[str] = field(default_factory=list)
     still_locked: List[str] = field(default_factory=list)
     pip_command: Optional[str] = None
 
     @property
     def healthy(self) -> bool:
-        return not (self.tilde or self.half_installed or self.stale_jars or self.still_locked)
+        return not (
+            self.tilde
+            or self.half_installed
+            or self.stale_jars
+            or self.still_locked
+            or any(not r["ok"] for r in self.class_path)
+        )
+
+    @property
+    def cirises(self) -> List[Dict[str, object]]:
+        """The Pythons that hold ciris-agent or ciris-server."""
+        return [p for p in self.pythons if p.get("agent") or p.get("server")]
 
 
 def _missing_from_record(site: Path, dist_info: Path) -> int:
@@ -212,7 +361,12 @@ def _examine(site: Path) -> Tuple[Dict[str, str], List[Path]]:
     return half, stale
 
 
-def doctor(repair: bool = False, site: Optional[Path] = None) -> DoctorReport:
+def doctor(
+    repair: bool = False,
+    site: Optional[Path] = None,
+    home: Optional[Path] = None,
+    probe_pythons: bool = True,
+) -> DoctorReport:
     """Report what an interrupted upgrade left, and with ``repair`` remove it.
     It never runs pip: that would need nothing of ours running, and only the person
     or an ``upgrade`` command knows that. ``pip_command`` says what finishes the job."""
@@ -225,6 +379,13 @@ def doctor(repair: bool = False, site: Optional[Path] = None) -> DoctorReport:
         half_installed=half,
         stale_jars=[str(p) for p in stale],
     )
+    if home is None:
+        home = Path(os.environ.get("CIRIS_HOME") or (Path.home() / "ciris"))
+    run_jar = desktop_run_jar(home)
+    if run_jar is not None:
+        rep.class_path = check_class_path(run_jar)
+    if probe_pythons:
+        rep.pythons = pythons_on_path()
     if repair:
         for p in [*tilde, *stale]:
             try:
@@ -257,6 +418,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"  half-installed {dist}: {why}")
         for jar in rep.stale_jars:
             print(f"  old desktop JAR: {jar}")
+        for row in rep.class_path:
+            if not row["ok"]:
+                print(f"  FAIL: the desktop JAR cannot find {row['entry']} (looked at {row['path']}):"
+                      " calls will have no video. Start the desktop once more, or reinstall.")
+        for p in rep.pythons:
+            have = ", ".join(f"{k} {p[k]}" for k in ("agent", "server", "client") if p.get(k)) or "no CIRIS"
+            print(f"  python {p['executable']}: {have}")
+        if len(rep.cirises) > 1:
+            print("  WARNING: more than one Python on PATH holds CIRIS. An upgrade goes to one of"
+                  " them; the other keeps running the old version. Keep one.")
         for path in rep.removed:
             print(f"  removed: {path}")
         for path in rep.still_locked:

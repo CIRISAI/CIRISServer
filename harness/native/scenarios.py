@@ -1919,6 +1919,17 @@ AV MEMBER — the production call routes, frames socket and events.
     _, gs = a.api("GET", f"/v1/chat/{room}/call")
     step("call_state", live=(gs or {}).get("live"), room_may_keep=(gs or {}).get("room_may_keep"),
          visible_to_watcher=(gs or {}).get("visible_to_watcher"))
+    # One entry per PERSON for the tiles (client 2026-11-27: three tiles in a
+    # two-person call): alice's view names bob once, with his node.
+    def bob_in_call() -> Any:
+        _, g = a.api("GET", f"/v1/chat/{room}/call")
+        ppl = (((g or {}).get("joined") or {}).get("in_call") or {}).get("people") or []
+        return ppl if any(p.get("person") == b.owner_key_id for p in ppl) else None
+    try:
+        in_call_people = wait_for("alice's call state to name bob", bob_in_call, 30, every=0.5)
+    except Exception:  # noqa: BLE001
+        in_call_people = []
+    step("in_call_people", people=in_call_people)
 
     received = {"alice": {}, "bob": {}}
     vrecv = {"alice": {"frames": 0, "intact": 0, "sizes": set()}, "bob": {"frames": 0, "intact": 0, "sizes": set()}}
@@ -2040,7 +2051,10 @@ AV MEMBER — the production call routes, frames socket and events.
         record["video"] = {"bytes": vbytes, "sent": vsent,
                            "intact_ratio": {"bob_from_alice": round(r_ab, 4), "alice_from_bob": round(r_ba, 4)}}
         video_ok = r_ab >= 0.95 and r_ba >= 0.95
-    ok = (ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
+    one_tile = (len(in_call_people) == 1 and in_call_people[0].get("person") == b.owner_key_id
+                and b.node_key_id in (in_call_people[0].get("nodes") or []))
+    record["in_call_people"] = in_call_people
+    ok = (one_tile and ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
           and left_ev.get("person") == b.owner_key_id and ready_ev.get("fragmenting") is video
           and video_ok)
     record["verdict"] = "PASS" if ok else "FAIL"
@@ -2049,6 +2063,142 @@ AV MEMBER — the production call routes, frames socket and events.
         step.fail("member_call", "each side must hear >= 99% and the node must declare chat:call",
                   [a, b], r"call|frames|publish")
         return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+    return {"verdict": "PASS", "steps": step.log}
+
+
+def av_ring(mesh: Mesh, args: Any) -> Record:
+    """RINGING end to end (0.5.255, src/call_ring.rs): alice joins her pair
+    room's call alone, so bob's node is rung over edge's opaque request; bob's
+    GET /v1/calls/ringing shows it; bob declines `busy` and alice's frames
+    socket hears `ringing` then `declined`. Then alice calls again and bob
+    answers by joining: his ring ends. Bars (RING_BAR_S, default 5 s): the ring
+    reaches bob, and his decline reaches alice, each within the bar; the
+    answer clears bob's ring within it. No retries."""
+    import threading
+    import websocket  # websocket-client
+
+    bar = float(os.environ.get("RING_BAR_S", "5"))
+    step = Steps(f"""
+AV RING — ring, decline (busy), ring again, answer.
+  proves:  a call joined alone rings the other member's node within {bar} s; the decline
+           reaches the caller's socket within {bar} s; answering ends the ring within {bar} s.""")
+    a = mesh.add("alice")
+    b = mesh.add("bob")
+    for n in (a, b):
+        n.claim(f"{n.name}-person")
+        n.announce()
+        n.self_record()
+        n.peer_with(mesh.canonical)
+    for host, guest in ((a, b), (b, a)):
+        wait_for(f"{host.name} to hold {guest.name}'s owner key",
+                 lambda h=host, g=guest: h.knows(g.owner_key_id), args.owner_wait)
+    a.add_contact(b.contact_code())
+    b.add_contact(a.contact_code())
+    room = a.open_pair(b.owner_key_id)
+    b.open_pair(a.owner_key_id)
+    wait_for("the pair room to key on both sides",
+             lambda: True if a.room(room)["ready"] and b.room(room)["ready"] else None,
+             args.arrive_wait, every=2)
+
+    def bob_ring() -> Any:
+        _, r = b.api("GET", "/v1/calls/ringing")
+        rings = (r or {}).get("ringing") or []
+        return next((x for x in rings if x.get("room") == room), None)
+
+    def fail(code: str, why: str, **kv: Any) -> Record:
+        step.fail(code, why, [a, b], r"call: rang|ringing|ring\.|opaque", **kv)
+        return {"verdict": "FAIL", "steps": step.log, "first_failure": step.first_failure}
+
+    events: list = []
+
+    def reader(ws: Any) -> None:
+        while True:
+            try:
+                op, data = ws.recv_data()
+            except Exception:  # noqa: BLE001
+                return
+            if op == websocket.ABNF.OPCODE_TEXT:
+                events.append((time.time(), json.loads(data)))
+            elif op == websocket.ABNF.OPCODE_CLOSE:
+                return
+
+    def call_alone() -> tuple:
+        st, got = a.api("POST", f"/v1/chat/{room}/call", {"video": False})
+        if st != 200:
+            return None, None, (st, got)
+        t0 = time.time()
+        url = a.url.replace("http://", "ws://") + f"/v1/chat/{room}/call/frames?ticket=" + got["frames_ticket"]
+        ws = websocket.create_connection(url, timeout=10)
+        threading.Thread(target=reader, args=(ws,), daemon=True).start()
+        return t0, ws, got
+
+    def first(ty: str, after: float) -> Any:
+        return next(((t, e) for t, e in events if e.get("type") == ty and t >= after), None)
+
+    record: dict = {"scenario": "av_ring", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "versions": _versions(), "bar_s": bar}
+    _, conf = a.api("GET", "/v1/federation/conformance")
+    feats = ((conf or {}).get("data") or conf or {}).get("features") if isinstance(conf, dict) else None
+    step("feature_declared", features=feats)
+    if not feats or "chat:call:ring" not in feats:
+        return fail("ring_not_declared", "the node must declare chat:call:ring", features=feats)
+    # 1. Ring, then decline busy.
+    t0, ws, got = call_alone()
+    if t0 is None:
+        return fail("join_refused", "alice's join was refused", status=got[0], body=got[1])
+    ring = wait_for("bob's node to be rung", bob_ring, max(bar * 4, 30), every=0.1)
+    ring_s = round(time.time() - t0, 2)
+    step("rung", seconds=ring_s, ring=ring, call_id=got.get("call_id"))
+    record["ring_s"] = ring_s
+    if ring.get("call_id") != got.get("call_id") or (ring.get("by") or {}).get("person") != a.owner_key_id:
+        return fail("ring_names_wrong", "the ring must name alice's call and alice", ring=ring, join=got)
+    t_dec = time.time()
+    st, dec = b.api("POST", f"/v1/chat/{room}/call/decline", {"reason": "busy"})
+    if st != 200 or not dec.get("caller_told"):
+        return fail("decline_failed", "bob's decline must reach alice's node", status=st, body=dec)
+    seen = wait_for("alice's socket to hear the decline",
+                    lambda: first("declined", t0), max(bar * 4, 30), every=0.1)
+    decline_s = round(seen[0] - t_dec, 2)
+    record["decline_s"] = decline_s
+    rung = first("ringing", t0)
+    step("declined", seconds=decline_s, event=seen[1], ringing=rung[1] if rung else None)
+    if seen[1].get("reason") != "busy" or seen[1].get("person") != b.owner_key_id:
+        return fail("decline_names_wrong", "the decline must say busy and name bob", event=seen[1])
+    if bob_ring() is not None:
+        return fail("ring_survived_decline", "bob's ring must end when he declines")
+    a.api("DELETE", f"/v1/chat/{room}/call")
+    try:
+        ws.close()
+    except Exception:  # noqa: BLE001
+        pass
+    # 2. Ring again, bob answers.
+    time.sleep(2)
+    t1, ws2, got2 = call_alone()
+    if t1 is None:
+        return fail("rejoin_refused", "alice's second join was refused", status=got2[0], body=got2[1])
+    wait_for("bob's node to be rung again", bob_ring, max(bar * 4, 30), every=0.1)
+    ring2_s = round(time.time() - t1, 2)
+    t_ans = time.time()
+    st, ans = b.api("POST", f"/v1/chat/{room}/call", {"video": False})
+    if st != 200:
+        return fail("answer_refused", "bob's answering join was refused", status=st, body=ans)
+    wait_for("bob's ring to end on answering", lambda: True if bob_ring() is None else None,
+             max(bar * 4, 30), every=0.1)
+    answer_s = round(time.time() - t_ans, 2)
+    record.update({"ring2_s": ring2_s, "answer_s": answer_s})
+    step("answered", ring_s=ring2_s, cleared_s=answer_s)
+    for n in (a, b):
+        n.api("DELETE", f"/v1/chat/{room}/call")
+    try:
+        ws2.close()
+    except Exception:  # noqa: BLE001
+        pass
+    ok = ring_s <= bar and decline_s <= bar and ring2_s <= bar and answer_s <= bar
+    record["verdict"] = "PASS" if ok else "FAIL"
+    _evidence(record, "av_ring")
+    if not ok:
+        return fail("ring_slow", f"each of ring, decline, re-ring and answer must land within {bar} s",
+                    ring_s=ring_s, decline_s=decline_s, ring2_s=ring2_s, answer_s=answer_s)
     return {"verdict": "PASS", "steps": step.log}
 
 
@@ -4389,6 +4539,7 @@ SCENARIOS: Dict[str, Callable[[Mesh, Any], Record]] = {
     "big_room": big_room,
     "av_mesh": av_mesh,
     "av_member": av_member,
+    "av_ring": av_ring,
     "av_share": av_share,
     "decisions": decisions,
     "av_echo": av_echo,

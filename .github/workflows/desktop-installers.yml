@@ -1,0 +1,201 @@
+name: desktop-installers
+
+# CIRIS desktop installers: the AGENT builds one payload per target (a
+# relocatable CPython with ciris-agent, ciris-server and ciris-client installed
+# from one hash-locked lock, plus a JRE: CIRISAgent desktop-payload.yml); the
+# SERVER wraps it per OS (Eric 2026-11-27):
+#   windows-x86_64          Inno Setup, per user, no administrator
+#   macos-arm64 / x86_64    CIRIS.app in a .dmg
+#   linux-x86_64 / aarch64  a per-user tarball with install.sh (aarch64 headless)
+# Because the payload is a real interpreter, not a frozen bundle, the app's
+# "Upgrade now" (payload.json upgrade_argv) upgrades it in place.
+#
+# UNSIGNED for 2.24 (Eric 2026-11-27): each shell has a marked SIGNING place.
+# The frozen installers (this repo's windows-installer.yml, the agent's
+# build-windows-installer) retire once this passes install, upgrade and
+# uninstall on Windows.
+#
+# The agent ref: a called workflow's github.sha is OURS, so the agent's
+# workflow takes the ref to build explicitly; `uses:` cannot take an
+# expression, so the workflow FILE's ref below moves with each agent release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      agent_ref:
+        description: "CIRISAgent ref (branch, tag or SHA) to build the payload from"
+        required: true
+        default: release/2.24.0
+  push:
+    tags: ['v*']
+  # A PR that touches the shells runs them (5 legs, 2 macOS: only then).
+  pull_request:
+    paths:
+      - 'installers/desktop/**'
+      - '.github/workflows/desktop-installers.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  payload:
+    uses: CIRISAI/CIRISAgent/.github/workflows/desktop-payload.yml@release/2.24.0
+    with:
+      agent_ref: ${{ inputs.agent_ref || 'release/2.24.0' }}
+
+  windows:
+    needs: payload
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-payload-windows-x86_64
+          path: payload-in
+      - name: Stage the payload (checks SHA256SUMS)
+        id: stage
+        shell: bash
+        run: |
+          python -m pip install -q zstandard
+          python -I installers/desktop/stage.py --payload-dir payload-in --out stage --github-output "$GITHUB_OUTPUT"
+      - name: Build the installer (Inno Setup, unsigned)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc /DPayloadDir="$PWD\stage" /DCirisVersion="${{ steps.stage.outputs.version }}" `
+            /DServerVersion="${{ steps.stage.outputs.server }}" /DClientVersion="${{ steps.stage.outputs.client }}" `
+            /DOutputDir="$PWD\dist" installers\desktop\windows\ciris.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist
+      - name: Smoke - install, run the payload, reinstall, uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist\CIRIS-Setup-*.exe)[0].FullName
+          $app = "$env:LOCALAPPDATA\Programs\CIRIS"
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER' -Wait
+          if (-not (Test-Path "$app\payload.json")) { throw "not installed at $app" }
+          Push-Location $app
+          & "$app\python\python.exe" -m ciris_engine.cli upgrade --help
+          if ($LASTEXITCODE -ne 0) { throw "upgrade --help failed from the installed payload" }
+          Pop-Location
+          # Reinstall over the top: the interpreter tree is replaced whole.
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CURRENTUSER' -Wait
+          if (-not (Test-Path "$app\python\python.exe")) { throw "reinstall lost the interpreter" }
+          $un = (Get-ChildItem "$app\unins*.exe")[0].FullName
+          Start-Process $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 5
+          if (Test-Path "$app\python") { throw "uninstall left $app\python" }
+          Write-Host "install, run, reinstall and uninstall: OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-installer-windows-x86_64
+          path: dist/*.exe
+          if-no-files-found: error
+
+  macos:
+    needs: payload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: macos-arm64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-payload-${{ matrix.target }}
+          path: payload-in
+      - name: Stage the payload (checks SHA256SUMS)
+        id: stage
+        run: |
+          python -m pip install -q zstandard
+          python -I installers/desktop/stage.py --payload-dir payload-in --out stage --github-output "$GITHUB_OUTPUT"
+      - name: Build CIRIS.app and the .dmg (unsigned)
+        id: dmg
+        run: |
+          sh installers/desktop/macos/build_app.sh stage "${{ steps.stage.outputs.version }}" dist
+          echo "path=$(ls dist/*.dmg)" >> "$GITHUB_OUTPUT"
+      - name: Smoke - mount, install to ~/Applications, run, remove
+        run: |
+          set -eu
+          mnt=$(mktemp -d)
+          hdiutil attach "${{ steps.dmg.outputs.path }}" -mountpoint "$mnt" -nobrowse -quiet
+          mkdir -p "$HOME/Applications"
+          cp -R "$mnt/CIRIS.app" "$HOME/Applications/"
+          hdiutil detach "$mnt" -quiet
+          "$HOME/Applications/CIRIS.app/Contents/MacOS/CIRIS" upgrade --help
+          rm -rf "$HOME/Applications/CIRIS.app"
+          echo "install, run and remove: OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-installer-${{ matrix.target }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  linux:
+    needs: payload
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            runner: ubuntu-latest
+          - target: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-payload-${{ matrix.target }}
+          path: payload-in
+      - name: Stage the payload (checks SHA256SUMS)
+        id: stage
+        run: |
+          python -m pip install -q zstandard
+          python -I installers/desktop/stage.py --payload-dir payload-in --out pkg/payload --github-output "$GITHUB_OUTPUT"
+      - name: Build the per-user tarball (unsigned)
+        id: tar
+        run: |
+          set -eu
+          cp installers/desktop/linux/install.sh installers/desktop/linux/uninstall.sh pkg/
+          chmod +x pkg/*.sh
+          name="CIRIS-${{ steps.stage.outputs.version }}-${{ matrix.target }}"
+          mkdir -p dist
+          mv pkg "$name"
+          tar -czf "dist/$name.tar.gz" "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Smoke - install, run, reinstall, uninstall (in a path with a space)
+        run: |
+          set -eu
+          export CIRIS_PREFIX="$RUNNER_TEMP/a prefix/ciris" CIRIS_BINDIR="$RUNNER_TEMP/a prefix/bin"
+          export XDG_DATA_HOME="$RUNNER_TEMP/a prefix/share" XDG_CONFIG_HOME="$RUNNER_TEMP/a prefix/config"
+          d="${{ steps.tar.outputs.name }}"
+          ./"$d"/install.sh
+          "$CIRIS_BINDIR/ciris" upgrade --help
+          ./"$d"/install.sh >/dev/null
+          "$CIRIS_PREFIX/uninstall.sh"
+          test ! -e "$CIRIS_PREFIX"
+          echo "install, run, reinstall and uninstall: OK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-installer-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error

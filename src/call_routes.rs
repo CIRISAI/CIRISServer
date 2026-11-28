@@ -56,6 +56,12 @@ use crate::call_frames::{self, Incoming};
 /// The capability word the client's Call action waits for (`chat:call`).
 pub const FEATURE: &str = "chat:call";
 
+/// The capability word for ringing and the opener's alert choice (0.5.255,
+/// `call_ring`): `alert` on the join, `GET /v1/calls/events`, decline. A client
+/// offers "Ring them" only where the node declares it; an older node ignores
+/// `alert` and rings nobody.
+pub const FEATURE_RING: &str = "chat:call:ring";
+
 /// "Live" when a member's attendance row is this recent, or this node is in it.
 const LIVE_WINDOW_SECS: i64 = 60;
 
@@ -188,6 +194,32 @@ struct Joined {
     /// Non-zero once [`hold_to_call_size`] found the call too big: the people
     /// it counted.
     full: std::sync::atomic::AtomicUsize,
+    /// Ringing's notices for this caller's socket (`ringing`, `declined`,
+    /// `no_answer`; `call_ring`), sent by the watch loop.
+    ring_notices: StdMutex<Vec<serde_json::Value>>,
+}
+
+/// Queue a ringing notice for this node's call socket in `room`.
+pub fn notify_caller(room: &str, v: serde_json::Value) {
+    if let Some(j) = current(room) {
+        j.ring_notices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(v);
+    }
+}
+
+/// The attendees of this node's call in `room`, or `None` when it is in no
+/// call there.
+pub async fn attendees_of(room: &str) -> Option<Vec<String>> {
+    let j = current(room)?;
+    let g = j.call.lock().await;
+    Some(g.as_ref()?.attendees().await)
+}
+
+/// The person a node belongs to (cached), for ringing.
+pub async fn person_of_node(engine: &Engine, node: &str) -> Option<String> {
+    person_of(engine, node).await
 }
 
 /// **Video only between two people, on edge v45.0.0** (Eric, 2026-11-10: "Yes
@@ -253,6 +285,12 @@ pub const CALL_FULL_WINDOW: std::time::Duration = std::time::Duration::from_secs
 pub fn call_full_json(people: usize) -> serde_json::Value {
     json!({ "type": "call_ended", "ended": "call_full", "reason_id": "call.full",
             "max_people": CALL_MAX_PEOPLE, "people": people })
+}
+
+/// The server's own end for a call that rang [`crate::call_ring::RING_TIMEOUT`]
+/// with nobody joining: the node leaves it, and the socket says so in words.
+pub fn no_answer_ended_json() -> serde_json::Value {
+    json!({ "type": "call_ended", "ended": "no_answer", "reason_id": "call.no_answer" })
 }
 
 /// Watch a call this node just joined for [`CALL_FULL_WINDOW`]: if it holds
@@ -381,6 +419,147 @@ async fn people_of(engine: &Engine, members: &[String]) -> serde_json::Value {
         out.push(json!({ "member": m, "person": person }));
     }
     serde_json::Value::Array(out)
+}
+
+/// The other people of `room` and their nodes, as this node holds them. Room
+/// members are PERSON keys (people join rooms, not nodes); a member that is a
+/// node (the QA door) stands for its owner. This node and its own person are
+/// left out. A person with no node held here has an empty list.
+pub async fn room_people(engine: &Engine, room: &str) -> Vec<(String, Vec<String>)> {
+    let Some(me) = crate::node_key::wire_identity().map(str::to_owned) else {
+        return Vec::new();
+    };
+    let members = match crate::mls_state::groups_for(&me).open_existing(room).await {
+        Ok(Some(g)) => g.member_key_ids().await,
+        _ => return Vec::new(),
+    };
+    let my_person = person_of(engine, &me).await;
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for m in members {
+        let owner = person_of(engine, &m).await;
+        let person = owner.clone().unwrap_or_else(|| m.clone());
+        if m == me || my_person.as_deref() == Some(person.as_str()) {
+            continue;
+        }
+        let mut nodes = crate::peer::bound_nodes_of(engine, &person)
+            .await
+            .unwrap_or_default();
+        if owner.is_some() && !nodes.contains(&m) {
+            nodes.push(m.clone());
+        }
+        nodes.retain(|n| *n != me);
+        match out.iter_mut().find(|(p, _)| *p == person) {
+            Some((_, ns)) => {
+                for n in nodes {
+                    if !ns.contains(&n) {
+                        ns.push(n);
+                    }
+                }
+            }
+            None => out.push((person, nodes)),
+        }
+    }
+    out
+}
+
+/// Who is in the call, ONE ENTRY PER PERSON, for a client's tiles
+/// (client 2026-11-27: a two-person call drew three tiles). Edge's `attendees`
+/// is the call's attendance RECORD: the subjects of its rows, which are the
+/// people who joined (attendance is authored by the person), this device's
+/// own person included, and leavers stay. Legs and `attendee_joined` name
+/// NODES. This folds both onto persons:
+/// `{me: {node, person}, people: [{person, nodes, connected}]}`, without this
+/// device's own person. `connected` means a leg to one of their nodes is up.
+pub async fn people_view(
+    engine: &Engine,
+    attendees: &[String],
+    legs: &[String],
+) -> serde_json::Value {
+    let me = crate::node_key::wire_identity()
+        .unwrap_or_default()
+        .to_owned();
+    let my_person = person_of(engine, &me).await;
+    let mut people: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for k in attendees.iter().chain(legs.iter()) {
+        if *k == me {
+            continue;
+        }
+        let owner = person_of(engine, k).await;
+        let person = owner.clone().unwrap_or_else(|| k.clone());
+        if my_person.as_deref() == Some(person.as_str()) {
+            continue;
+        }
+        let node = owner.is_some().then(|| k.clone());
+        let up = legs.contains(k);
+        match people.iter_mut().find(|(p, _, _)| *p == person) {
+            Some((_, nodes, connected)) => {
+                if let Some(n) = node {
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+                *connected |= up;
+            }
+            None => people.push((person, node.into_iter().collect(), up)),
+        }
+    }
+    json!({
+        "me": { "node": me, "person": my_person },
+        "people": people
+            .into_iter()
+            .map(|(p, n, c)| json!({ "person": p, "nodes": n, "connected": c }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Whether each other person in `room` can be heard from, as THIS node sees
+/// it: a warning for "you are calling someone whose device is offline", never
+/// a refusal. One entry per person: `{member, person, nodes, in_call,
+/// last_heard_ms_ago, reachable_now}` (`member` = `person`, the room member's
+/// key). `last_heard_ms_ago` is the newest row held here that the person or
+/// one of their nodes signed (null: none held). `reachable_now` is edge's
+/// live reach reading (CIRISEdge 45.3 `peer_reach`); until the node runs on
+/// it, null = unknown.
+pub async fn reach_view(engine: &Engine, room: &str, attendees: &[String]) -> serde_json::Value {
+    let now = chrono::Utc::now();
+    let mut out = Vec::new();
+    for (person, nodes) in room_people(engine, room).await {
+        let heard = crate::contacts_chat::last_heard_from(engine, &person, &nodes).await;
+        let ago = heard.map(|at| u64::try_from((now - at).num_milliseconds()).unwrap_or(0));
+        let in_call = attendees.contains(&person) || nodes.iter().any(|n| attendees.contains(n));
+        out.push(json!({
+            "member": person,
+            "person": person,
+            "nodes": nodes,
+            "in_call": in_call,
+            "last_heard_ms_ago": ago,
+            "reachable_now": serde_json::Value::Null,
+        }));
+    }
+    json!({ "view": "this_node", "members": out })
+}
+
+/// How long after the socket opens, with no `ready`, `connecting` is sent again.
+pub const CONNECTING_AGAIN_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `{type: connecting, members, since_ms, reach}`: `members` are the room's
+/// other people (who the call waits on), `since_ms` the unix ms the socket
+/// opened.
+async fn connecting_json(
+    engine: &Engine,
+    room: &str,
+    attendees: &[String],
+    since_ms: i64,
+) -> serde_json::Value {
+    connecting_from(reach_view(engine, room, attendees).await, since_ms)
+}
+
+fn connecting_from(reach: serde_json::Value, since_ms: i64) -> serde_json::Value {
+    let members: Vec<serde_json::Value> = reach["members"]
+        .as_array()
+        .map(|a| a.iter().map(|m| m["member"].clone()).collect())
+        .unwrap_or_default();
+    json!({ "type": "connecting", "members": members, "since_ms": since_ms, "reach": reach })
 }
 
 /// Add `person` beside `member` on an event that names one.
@@ -520,6 +699,12 @@ struct JoinBody {
     /// `true` to relay.
     #[serde(default)]
     relay: Option<bool>,
+    /// How opening this call alerts the room: `open`, `notify` or `ring`
+    /// (`call_ring::Alert`). Omitted: ring a room of at most
+    /// [`CALL_MAX_PEOPLE`] people, notify a bigger one. Only the opener's
+    /// counts; joining a live call alerts nobody.
+    #[serde(default)]
+    alert: Option<String>,
 }
 
 /// The codecs a video stream (a camera, or a share) is bound to: AV1 under
@@ -618,6 +803,20 @@ async fn join(
             )
         }
     };
+    let asked_alert = match body.alert.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(w) => match crate::call_ring::Alert::parse(w) {
+            Some(a) => Some(a),
+            None => {
+                return refuse_with(
+                    StatusCode::BAD_REQUEST,
+                    "call.alert_unknown",
+                    "That isn't a way of letting the room know about a call.",
+                    json!({ "accepted": ["open", "notify", "ring"] }),
+                )
+            }
+        },
+    };
     let serve_seat = is_serve_seat(&st.engine).await;
     let relay = !serve_seat
         && body
@@ -646,7 +845,20 @@ async fn join(
         );
     }
     let video_ok = video_allowed(people_now);
-    let view = join_view(&st.engine, &room, &call, body.video, false).await;
+    let mut view = join_view(&st.engine, &room, &call, body.video, false).await;
+    // Ringing (`call_ring`): this device answering a ring stops it ringing
+    // here; a call nobody else is in yet rings the room.
+    crate::call_ring::answered_here(&room);
+    // Attendance rows are authored by the PERSON, so "nobody else is in it"
+    // means no attendee but this node or its own person.
+    let me = crate::node_key::wire_identity().unwrap_or_default();
+    let my_person = person_of(&st.engine, me).await;
+    let first = call
+        .attendees()
+        .await
+        .iter()
+        .all(|m| m == me || my_person.as_deref() == Some(m.as_str()));
+    let call_id = hex::encode(call.id().0);
     joined()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -661,8 +873,27 @@ async fn join(
                 video_ok: std::sync::atomic::AtomicBool::new(video_ok),
                 share: StdMutex::new(None),
                 full: std::sync::atomic::AtomicUsize::new(0),
+                ring_notices: StdMutex::new(Vec::new()),
             }),
         );
+    // The alert mode: the opener's choice, or the room's size.
+    let alert = if first {
+        let in_room = room_people(&st.engine, &room).await.len() + 1;
+        let a = asked_alert.unwrap_or_else(|| crate::call_ring::Alert::default_for(in_room));
+        crate::call_ring::start(
+            Arc::clone(&st.edge),
+            Arc::clone(&st.engine),
+            room.clone(),
+            call_id,
+            body.video,
+            a,
+        );
+        Some(a.token())
+    } else {
+        None
+    };
+    // null: this device joined a call already live, and alerted nobody.
+    view["alert"] = json!(alert);
     if let Some(mine) = current(&room) {
         tokio::spawn(hold_to_call_size(
             Arc::clone(&st.engine),
@@ -690,14 +921,18 @@ async fn join_view(
         "video_max_people": VIDEO_MAX_PEOPLE,
         "room": room,
         "already_joined": already,
-        "call_id": format!("{:?}", call.id()),
+        "call_id": hex::encode(call.id().0),
         "stream_id": hex::encode(call.stream().0),
         "epoch": call.epoch().await.0,
         "video": video,
+        // null until a leg is up; the socket's `ready` carries it then.
         "frame_budget_bytes": call.chunk_plaintext_budget(),
-        "service_tier": format!("{:?}", call.service_tier()),
+        "service_tier": call.service_tier().token(),
+        "state": state_view(&call.state()),
         "attendees": attendees,
         "attendee_people": people,
+        "in_call": people_view(engine, &attendees, &call.legs()).await,
+        "reach": reach_view(engine, room, &attendees).await,
         "legs": call.legs(),
         "relay": relay_view(engine, call, is_serve_seat(engine).await).await,
         "frames_socket": format!("/v1/chat/{room}/call/frames"),
@@ -834,10 +1069,12 @@ async fn state(
             match g.as_ref() {
                 Some(c) => Some(json!({
                     "attendee_people": people_of(&st.engine, &c.attendees().await).await,
+                    "reach": reach_view(&st.engine, &room, &c.attendees().await).await,
+                    "in_call": people_view(&st.engine, &c.attendees().await, &c.legs()).await,
                     "stream_id": hex::encode(c.stream().0),
-                    "state": format!("{:?}", c.state()),
+                    "state": state_view(&c.state()),
                     "frame_budget_bytes": c.chunk_plaintext_budget(),
-                    "service_tier": format!("{:?}", c.service_tier()),
+                    "service_tier": c.service_tier().token(),
                     "attendees": c.attendees().await,
                     "legs": c.legs(),
                     "relay": relay_view(&st.engine, c, is_serve_seat(&st.engine).await).await,
@@ -1169,6 +1406,21 @@ pub fn end_ids(cause: &EndCause) -> (&'static str, &'static str) {
 }
 
 /// The `call_ended` socket event.
+/// A call's state as tokens: `{state: "live"}`, `{state: "degraded", epoch,
+/// reason}` or `{state: "ended", ended, reason_id}` (the `call_ended` ids).
+pub fn state_view(state: &EdgeCallState) -> serde_json::Value {
+    match state {
+        EdgeCallState::Live => json!({ "state": "live" }),
+        EdgeCallState::Degraded { epoch, reason } => {
+            json!({ "state": "degraded", "epoch": epoch, "reason": reason })
+        }
+        EdgeCallState::Ended(cause) => {
+            let (token, id) = end_ids(cause);
+            json!({ "state": "ended", "ended": token, "reason_id": id })
+        }
+    }
+}
+
 pub fn ended_json(cause: &EndCause) -> serde_json::Value {
     let (token, id) = end_ids(cause);
     json!({ "type": "call_ended", "ended": token, "reason_id": id })
@@ -1333,16 +1585,66 @@ async fn pump(
     // again when the budget changes; `attendee_left {left: "lost"}` when a
     // member's leg has been gone for 5 s (edge's Down bound at depth 0; a failover can
     // take a leg for over 2 s). A client publishes only after `ready`.
+    //
+    // `connecting {members, since_ms, reach}` when the socket opens, and once
+    // more if no `ready` has come CONNECTING_AGAIN_AFTER later: who the call is
+    // waiting on and whether this node has heard from them (`reach_view`), so
+    // a client can say "Francesco's device hasn't been seen since…" instead of
+    // ringing silently. A warning; the call carries on.
     let jw = Arc::clone(&j);
     let out_w = out_tx.clone();
     let eng_w = Arc::clone(&engine);
+    let room_w = room.clone();
     let watch_task = tokio::spawn(async move {
+        let since_ms = chrono::Utc::now().timestamp_millis();
+        let opened = std::time::Instant::now();
+        let mut connecting_sent: u8 = 0;
         let mut last_budget: Option<usize> = None;
         let mut legs_seen: HashMap<String, Option<std::time::Instant>> = HashMap::new();
         let mut last_video: Option<bool> = None;
         let mut tick: u32 = 0;
         loop {
+            let due = match connecting_sent {
+                0 => true,
+                1 => last_budget.is_none() && opened.elapsed() >= CONNECTING_AGAIN_AFTER,
+                _ => false,
+            };
+            if due {
+                connecting_sent += 1;
+                let attendees = {
+                    let g = jw.call.lock().await;
+                    match g.as_ref() {
+                        Some(c) => c.attendees().await,
+                        None => break,
+                    }
+                };
+                let m = connecting_json(&eng_w, &room_w, &attendees, since_ms).await;
+                if out_w
+                    .send(Message::Text(m.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            let notices: Vec<serde_json::Value> = std::mem::take(
+                &mut *jw
+                    .ring_notices
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            let mut gone = false;
+            for v in notices {
+                let text = with_person(&eng_w, v).await.to_string();
+                if out_w.send(Message::Text(text.into())).await.is_err() {
+                    gone = true;
+                    break;
+                }
+            }
+            if gone {
+                break;
+            }
             // Once a second: how many people are in the call (VIDEO_MAX_PEOPLE).
             if tick % 4 == 0 {
                 let people = {
@@ -1819,6 +2121,9 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
     if let Ok(h) = tokio::runtime::Handle::try_current() {
         let _ = runtime().set(h);
     }
+    // Ringing's receiver (`call_ring`): rings, ends and declines from the
+    // room's other member nodes.
+    crate::call_ring::register(&edge, Arc::clone(&engine));
     Router::new()
         .route(
             "/v1/chat/{room}/call",
@@ -1838,7 +2143,92 @@ pub fn router(engine: Arc<Engine>, edge: Arc<Edge>) -> Router {
             "/v1/chat/{room}/call/share/frames",
             axum::routing::get(share_socket),
         )
+        .route("/v1/chat/{room}/call/decline", axum::routing::post(decline))
+        .route("/v1/calls/ringing", axum::routing::get(ringing_now))
+        .route("/v1/calls/events", axum::routing::get(ring_events))
         .with_state(CallState { engine, edge })
+}
+
+#[derive(Deserialize, Default)]
+struct DeclineBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// `POST /v1/chat/{room}/call/decline {reason: declined|busy}`: decline the
+/// ring this device is hearing in `room` (`call_ring`).
+async fn decline(
+    State(st): State<CallState>,
+    headers: HeaderMap,
+    Path(room): Path<String>,
+    body: Option<Json<DeclineBody>>,
+) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let reason = body
+        .and_then(|Json(b)| b.reason)
+        .unwrap_or_else(|| "declined".to_owned());
+    if !crate::call_ring::DECLINE_REASONS.contains(&reason.as_str()) {
+        return refuse_with(
+            StatusCode::BAD_REQUEST,
+            "call.decline_reason_unknown",
+            "That isn't a reason for declining a call.",
+            json!({ "accepted": crate::call_ring::DECLINE_REASONS }),
+        );
+    }
+    match crate::call_ring::decline(&st.edge, &room, &reason).await {
+        Some(v) => (StatusCode::OK, Json(v)).into_response(),
+        None => (
+            StatusCode::OK,
+            Json(json!({ "room": room, "declined": "not_ringing" })),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/calls/ringing`: the rings live on this device now.
+async fn ringing_now(State(st): State<CallState>, headers: HeaderMap) -> Response {
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    (
+        StatusCode::OK,
+        Json(crate::call_ring::live(&st.engine).await),
+    )
+        .into_response()
+}
+
+/// `GET /v1/calls/events`: SSE of `call_ringing` and `call_ring_ended`. Opens
+/// with the rings live now (`event: ringing_now`), since a broadcast does not
+/// replay; a lagged reader is told to fetch `GET /v1/calls/ringing`.
+async fn ring_events(State(st): State<CallState>, headers: HeaderMap) -> Response {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    if let Err(r) = require_owner(&st, &headers).await {
+        return r;
+    }
+    let now = crate::call_ring::live(&st.engine).await;
+    let first = futures_util::stream::once(async move {
+        Event::default().event("ringing_now").data(now.to_string())
+    });
+    let rx = crate::call_ring::subscribe();
+    let live = futures_util::stream::unfold(rx, |mut rx| async move {
+        let e = match rx.recv().await {
+            Ok(v) => {
+                let ty = v["type"].as_str().unwrap_or("call").to_owned();
+                Event::default().event(ty).data(v.to_string())
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Event::default()
+                .event("resync")
+                .data(json!({ "fetch": "/v1/calls/ringing" }).to_string()),
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+        };
+        Some((e, rx))
+    });
+    Sse::new(first.chain(live).map(Ok::<Event, std::convert::Infallible>))
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
+        .into_response()
 }
 
 #[cfg(test)]
@@ -2081,6 +2471,43 @@ mod tests {
         assert_eq!(signed_end("lost"), SignedEnd::Left);
     }
 
+    /// The call's state, tier and the `connecting` event are tokens and
+    /// shapes the client pins, never Rust Debug strings.
+    #[test]
+    fn call_state_and_connecting_are_tokens() {
+        assert_eq!(state_view(&EdgeCallState::Live), json!({ "state": "live" }));
+        let d = state_view(&EdgeCallState::Degraded {
+            epoch: 3,
+            reason: "r".into(),
+        });
+        assert_eq!(d, json!({ "state": "degraded", "epoch": 3, "reason": "r" }));
+        let e = state_view(&EdgeCallState::Ended(EndCause::HungUp));
+        assert_eq!(
+            e,
+            json!({ "state": "ended", "ended": "hung_up", "reason_id": "call.end.hung_up" })
+        );
+        assert_eq!(ciris_edge::ServiceTier::FullOps.token(), "load_tier:0");
+
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/call_frames_v1.json"
+        ))
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let pinned = v["events"]["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["type"] == "connecting")
+            .unwrap()
+            .clone();
+        let built = connecting_from(pinned["reach"].clone(), 1_795_000_000_000);
+        assert_eq!(
+            built, pinned,
+            "the server builds the pinned connecting event"
+        );
+    }
+
     /// Every way a call ends has its token and copy key, and the vectors the
     /// client pins say the same (`call.ended` stays the CONFLICT string).
     #[test]
@@ -2106,10 +2533,13 @@ mod tests {
                 token: "onion_anonymous_no_media",
             },
         ];
-        // Edge's causes plus the server's own: a call over the four-person limit.
-        assert_eq!(pinned.len(), causes.len() + 1);
+        // Edge's causes plus the server's own: a call over the four-person
+        // limit, and a call that rang with nobody answering.
+        assert_eq!(pinned.len(), causes.len() + 2);
         let full = call_full_json(5);
         assert_eq!(pinned[full["ended"].as_str().unwrap()], full["reason_id"]);
+        let none = no_answer_ended_json();
+        assert_eq!(pinned[none["ended"].as_str().unwrap()], none["reason_id"]);
         for c in &causes {
             let out = ended_json(c);
             assert_eq!(out["type"], "call_ended");

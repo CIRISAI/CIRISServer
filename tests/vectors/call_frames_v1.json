@@ -153,6 +153,24 @@
   "encoding": "one JSON object per WebSocket text message; member = a key_id, never a name; every stream_id = 64 lowercase hex, the binary frame's raw 32 bytes; an event naming a member also carries `person` (the node's owner, null until bound); `ready.fragmenting` says whether the node splits an over-budget frame (edge 45.1) or refuses it",
   "examples": [
    {
+    "type": "connecting",
+    "members": ["bob-person-user-n7utwedh3z"],
+    "since_ms": 1795000000000,
+    "reach": {
+     "view": "this_node",
+     "members": [
+      {
+       "member": "bob-person-user-n7utwedh3z",
+       "person": "bob-person-user-n7utwedh3z",
+       "nodes": ["native-bob-v5lo2uulck"],
+       "in_call": false,
+       "last_heard_ms_ago": 412000,
+       "reachable_now": null
+      }
+     ]
+    }
+   },
+   {
     "type": "ready",
     "frame_budget_bytes": 244,
     "fragmenting": false
@@ -327,13 +345,23 @@
     "people": 5
    }
   ],
+  "in_call_example": {
+   "where": "join answer and GET /v1/chat/{room}/call (under `joined`): `in_call`",
+   "value": {
+    "me": { "node": "native-alice-ubcv3slgha", "person": "alice-person-user-dep4jeokqy" },
+    "people": [
+     { "person": "bob-person-user-n7utwedh3z", "nodes": ["native-bob-v5lo2uulck"], "connected": true }
+    ]
+   },
+   "rule": "one entry per OTHER person (this device's own person is never listed); nodes = that person's node keys seen in the call; connected = a leg to one of them is up. A person on two devices is ONE entry with two nodes; whether that is one tile or two is the client's choice. A person with no node seen yet has nodes = [] and connected = false."
+  },
   "left_values": [
    "left",
    "backgrounded",
    "removed",
    "lost"
   ],
-  "notes": "Edge v45.0.0 (0.5.246). attendee_left with stream_id carries the attendee's signed cause (CallEvent::AttendeeLeft): left|backgrounded from its signed end, removed when its key left the room's MLS group, lost when every leg went and its stream stayed silent 5 s. attendee_left without stream_id is the room dropping a member (CallEvent::MemberLeft, left=removed); a client may see both for one person and treats leaving as idempotent. stream_added.kind is media|share (CC rc18; an unknown value renders as media). stream_ended.ended adds `ended` (a share stopped, the attendee stays). stream_replaced: new_stream_id carries on old_stream_id, with no leave. video_unavailable: this node hears that member only through the canonical, audio only; video_restored when a member path carries it again. video_allowed: sent on connect and on change; above max_people the call is audio only and video frames are refused (publish_refused video_two_people_only). Screen share is refused (call.share_unavailable) until 45.1. Edge 45.2.0 (CIRISServer 0.5.254; edge docs/calls_relay_tokens.md, frozen for 45.x, unknown tokens show as the generic case): relay_status.relaying_for counts PEOPLE (the server maps edge's child nodes to owners; an unbound node is one person), relaying_for_nodes is edge's node count, serve_seat true means no relay switch. media_path_restored.through is a node key id (the attendee member id space), null on a direct path; direct = via != peer_relay. media_path_failed.cause and .relay are edge tokens verbatim with reason_id call.media_path_failed.<cause> and relay_reason_id call.relay_standing.<relay>; diag is edge's serde form, for the ? panel only. call_ended: the call ended under the socket; ended is edge's token, reason_id from call_ended_values (a mid-call media refusal reuses the join refusal's id); the node then closes the socket with the bare token as the close reason. Join refusals: call.anonymous_mode (token onion_anonymous_no_media) and call.shaped_only (token shaped_only_no_media). call_ended ended=call_full (reason_id call.full, with max_people and people) is the server's own: a call holds at most four people on edge 45.2.0; a device whose join made it five leaves within 30 s of joining, and a join that already sees five is refused 409 call.full. The members who were there first stay; a room still seats six.",
+  "notes": "Edge v45.0.0 (0.5.246). attendee_left with stream_id carries the attendee's signed cause (CallEvent::AttendeeLeft): left|backgrounded from its signed end, removed when its key left the room's MLS group, lost when every leg went and its stream stayed silent 5 s. attendee_left without stream_id is the room dropping a member (CallEvent::MemberLeft, left=removed); a client may see both for one person and treats leaving as idempotent. stream_added.kind is media|share (CC rc18; an unknown value renders as media). stream_ended.ended adds `ended` (a share stopped, the attendee stays). stream_replaced: new_stream_id carries on old_stream_id, with no leave. video_unavailable: this node hears that member only through the canonical, audio only; video_restored when a member path carries it again. video_allowed: sent on connect and on change; above max_people the call is audio only and video frames are refused (publish_refused video_two_people_only). Screen share is refused (call.share_unavailable) until 45.1. Edge 45.2.0 (CIRISServer 0.5.254; edge docs/calls_relay_tokens.md, frozen for 45.x, unknown tokens show as the generic case): relay_status.relaying_for counts PEOPLE (the server maps edge's child nodes to owners; an unbound node is one person), relaying_for_nodes is edge's node count, serve_seat true means no relay switch. media_path_restored.through is a node key id (the attendee member id space), null on a direct path; direct = via != peer_relay. media_path_failed.cause and .relay are edge tokens verbatim with reason_id call.media_path_failed.<cause> and relay_reason_id call.relay_standing.<relay>; diag is edge's serde form, for the ? panel only. call_ended: the call ended under the socket; ended is edge's token, reason_id from call_ended_values (a mid-call media refusal reuses the join refusal's id); the node then closes the socket with the bare token as the close reason. Join refusals: call.anonymous_mode (token onion_anonymous_no_media) and call.shaped_only (token shaped_only_no_media). call_ended ended=call_full (reason_id call.full, with max_people and people) is the server's own: a call holds at most four people on edge 45.2.0; a device whose join made it five leaves within 30 s of joining, and a join that already sees five is refused 409 call.full. The members who were there first stay; a room still seats six. Server 0.5.255: `connecting {members, since_ms, reach}` is sent when the socket opens and once more if no `ready` came within 20 s; members are the room's other PEOPLE (room members are person keys; each reach entry lists that person's nodes held here, a person with two devices is one entry with two nodes), since_ms the unix ms the socket opened. reach is THIS node's view: last_heard_ms_ago = age of the newest row held here that the person or one of their nodes signed (null: none); reachable_now is null (unknown) until edge 45.3 peer_reach. A warning, never a refusal. The join answer and GET call state carry the same `reach`; call_id is 64 lowercase hex; service_tier is edge's token load_tier:0|1|2; state is {state: live} | {state: degraded, epoch, reason} | {state: ended, ended, reason_id}; frame_budget_bytes is null until a leg is up. Server 0.5.255: the join answer and GET call state carry `in_call` {me: {node, person}, people: [{person, nodes, connected}]}: ONE entry per other person, for tiles. `attendees` is edge's attendance RECORD (people who joined, this device's own person included, leavers kept) and legs/attendee_joined name NODES, so a tile per key there draws a person twice and draws yourself; draw tiles from in_call.people and update them by each event's `person`.",
   "ended_values": [
    "left",
    "backgrounded",
@@ -347,7 +375,75 @@
    "expired": "call.end.expired",
    "shaped_only_no_media": "call.shaped_only",
    "onion_anonymous_no_media": "call.anonymous_mode",
-   "call_full": "call.full"
+   "call_full": "call.full",
+   "no_answer": "call.no_answer"
   }
+ },
+ "ringing": {
+  "alert": {
+   "join_body": { "video": false, "alert": "ring" },
+   "values": ["open", "notify", "ring"],
+   "default": "ring when the room has at most 4 people (CALL_MAX_PEOPLE), notify above that",
+   "join_answer": "`alert`: the mode used, when this join opened the call; null when it joined a call already live (that alerts nobody)",
+   "refusal": "400 call.alert_unknown {accepted}",
+   "meaning": "open: the call is just there (members see it from the call row). notify: each other person's nodes get call_notice, with no ring, no decline and no timeout; the caller's socket gets notified {members}. ring: everything below. Eric 2026-11-27: ringing is a choice, e.g. a live chat in a room of 100. The opener sets it; a receiver may only lower it for itself. Carried in the ring message until edge's call row has the member (after 45.3)."
+  },
+  "spec": "Server 0.5.255 (src/call_ring.rs). Transient call control, never a row: nothing is stored or replicated, a ring reaches only the nodes of the room's other people, a receiver refuses a non-member (403) and more than 6 rings a minute from one key (429). A call joined with nobody else in it rings every node of every other person in the room (never the caller's own other devices). It rings while the app runs; a backgrounded phone is not woken (CIRISServer#24).",
+  "node_events": {
+   "stream": "GET /v1/calls/events (SSE, the owner's session). Opens with event `ringing_now` = GET /v1/calls/ringing's body; then one event per ring change, the SSE event name = `type`; `resync` {fetch} after a lag.",
+   "examples": [
+    {
+     "type": "call_ringing",
+     "room": "community-7f3a",
+     "call_id": "5c1e0b7a9d2f4e6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
+     "by": { "member": "native-alice-node-q2w3e4", "person": "alice-person-user-x9y8z7" },
+     "video": false,
+     "since_ms": 1795000000000
+    },
+    {
+     "type": "call_notice",
+     "room": "community-7f3a",
+     "call_id": "5c1e0b7a9d2f4e6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
+     "by": { "member": "native-alice-node-q2w3e4", "person": "alice-person-user-x9y8z7" },
+     "video": false,
+     "since_ms": 1795000000000
+    },
+    {
+     "type": "call_ring_ended",
+     "room": "community-7f3a",
+     "call_id": "5c1e0b7a9d2f4e6a8b0c1d2e3f405162738495a6b7c8d9e0f1a2b3c4d5e6f708",
+     "why": "answered_elsewhere"
+    }
+   ],
+   "ring_ended_why": ["answered", "answered_elsewhere", "declined", "cancelled", "timeout"],
+   "ringing_now": { "ringing": ["<call_ringing objects>"] }
+  },
+  "decline": {
+   "route": "POST /v1/chat/{room}/call/decline",
+   "body": { "reason": "declined" },
+   "reasons": ["declined", "busy"],
+   "answer": { "room": "community-7f3a", "call_id": "<hex>", "reason": "declined", "caller_told": true },
+   "not_ringing": { "room": "community-7f3a", "declined": "not_ringing" },
+   "refusal": "400 call.decline_reason_unknown {accepted}"
+  },
+  "caller_socket_events": [
+   {
+    "type": "ringing",
+    "members": [
+     { "member": "native-bob-v5lo2uulck", "person": "bob-person-user-n7utwedh3z", "state": "ringing" }
+    ]
+   },
+   { "type": "declined", "member": "native-bob-v5lo2uulck", "person": "bob-person-user-n7utwedh3z", "reason": "busy" },
+   { "type": "no_answer", "why": "timeout" },
+   {
+    "type": "notified",
+    "members": [
+     { "member": "native-bob-v5lo2uulck", "person": "bob-person-user-n7utwedh3z", "state": "notified" }
+    ]
+   }
+  ],
+  "member_states": ["ringing", "notified", "in_call", "busy", "declined", "unreachable", "refused"],
+  "timeout_s": 45,
+  "notes": "`ringing` is sent once every member node has answered the ring or failed to (unreachable = no path now or no answer within 8 s; refused = the member's node refused it, e.g. it doesn't hold that room yet; in_call = that node is already in this room's call, two people having joined at once, and it was not rung). `no_answer` why=declined when every member rung declined or is busy (the call stays up; the caller leaves); why=timeout after 45 s with nobody joined, and then the node sends call_ended {ended: no_answer, reason_id: call.no_answer} and leaves the call itself; the socket closes. Someone joining ends the ring everywhere: their own other devices hear answered_elsewhere. Answering is joining the call (POST /v1/chat/{room}/call); it stops this device ringing."
  }
 }
