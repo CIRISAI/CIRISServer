@@ -78,6 +78,60 @@ pub const END_WHYS: [&str; 5] = [
     "timeout",
 ];
 
+/// How a call's opener alerts the room (Eric 2026-11-27: "whether to ring must
+/// be an option": a live chat in a room of 100 need not ring anyone). The
+/// opener sets it; a receiver may only lower it for itself. Until edge's call
+/// row carries it (after 45.3; the Constitution names the member), it rides
+/// the ring message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Alert {
+    /// The call is just there; members learn of it from the call row.
+    Open,
+    /// A notice, with no ring, no decline and no timeout.
+    Notify,
+    /// The full ring: decline (declined|busy), timeout, answered elsewhere.
+    Ring,
+}
+
+impl Alert {
+    /// `open`, `notify` or `ring`.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Notify => "notify",
+            Self::Ring => "ring",
+        }
+    }
+
+    /// From a client's word; `None` for a word that is not one of the three.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "open" => Some(Self::Open),
+            "notify" => Some(Self::Notify),
+            "ring" => Some(Self::Ring),
+            _ => None,
+        }
+    }
+
+    /// The mode when the client names none (Eric 2026-11-27): ring a room of
+    /// at most [`crate::call_routes::CALL_MAX_PEOPLE`] people (everyone could
+    /// be in the call), notify a bigger one.
+    #[must_use]
+    pub const fn default_for(people_in_room: usize) -> Self {
+        if people_in_room <= crate::call_routes::CALL_MAX_PEOPLE {
+            Self::Ring
+        } else {
+            Self::Notify
+        }
+    }
+}
+
+fn ring_word() -> String {
+    "ring".to_owned()
+}
+
 /// One ring message on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -88,6 +142,9 @@ pub enum Wire {
         call_id: String,
         video: bool,
         since_ms: i64,
+        /// `ring` or `notify` (`open` is never sent).
+        #[serde(default = "ring_word")]
+        alert: String,
     },
     End {
         v: u8,
@@ -259,6 +316,7 @@ pub async fn handle(engine: &Engine, sender: &str, payload: &[u8]) -> OpaqueResp
             call_id,
             video,
             since_ms,
+            alert,
             ..
         } => {
             if !rate_ok(sender, Instant::now()) {
@@ -268,6 +326,18 @@ pub async fn handle(engine: &Engine, sender: &str, payload: &[u8]) -> OpaqueResp
             // seeing an empty call): nothing to ring.
             if crate::call_routes::attendees_of(&room).await.is_some() {
                 return respond(200, json!({ "state": "in_call" }));
+            }
+            if Alert::parse(&alert) == Some(Alert::Notify) {
+                let person = crate::call_routes::person_of_node(engine, sender).await;
+                publish(json!({
+                    "type": "call_notice",
+                    "room": room,
+                    "call_id": call_id,
+                    "by": { "member": sender, "person": person },
+                    "video": video,
+                    "since_ms": since_ms,
+                }));
+                return respond(200, json!({ "state": "notified" }));
             }
             let i = Incoming {
                 call_id,
@@ -409,7 +479,17 @@ fn in_call_answer(payload: &[u8]) -> bool {
 
 /// Start ringing the room for this node's new call. The call's own attendee
 /// list decides "answered"; the caller leaving decides "cancelled".
-pub fn start(edge: Arc<Edge>, engine: Arc<Engine>, room: String, call_id: String, video: bool) {
+pub fn start(
+    edge: Arc<Edge>,
+    engine: Arc<Engine>,
+    room: String,
+    call_id: String,
+    video: bool,
+    alert: Alert,
+) {
+    if alert == Alert::Open {
+        return;
+    }
     tokio::spawn(async move {
         let to = targets(&engine, &room).await;
         if to.is_empty() {
@@ -433,6 +513,7 @@ pub fn start(edge: Arc<Edge>, engine: Arc<Engine>, room: String, call_id: String
             call_id: call_id.clone(),
             video,
             since_ms,
+            alert: alert.token().to_owned(),
         };
         let sends = to.iter().map(|m| {
             let edge = Arc::clone(&edge);
@@ -446,6 +527,7 @@ pub fn start(edge: Arc<Edge>, engine: Arc<Engine>, room: String, call_id: String
         for (m, r) in futures_util::future::join_all(sends).await {
             let state: &'static str = match &r {
                 Ok(resp) if resp.status == 200 && in_call_answer(&resp.payload) => "in_call",
+                Ok(resp) if resp.status == 200 && alert == Alert::Notify => "notified",
                 Ok(resp) if resp.status == 200 => "ringing",
                 Ok(_) => "refused",
                 Err(_) => "unreachable",
@@ -458,6 +540,15 @@ pub fn start(edge: Arc<Edge>, engine: Arc<Engine>, room: String, call_id: String
             }
         }
         let view = members_view(&engine, &room).await;
+        if alert == Alert::Notify {
+            // A notice has no decline and no timeout: say who was told, done.
+            lock(outgoing()).remove(&room);
+            crate::call_routes::notify_caller(
+                &room,
+                json!({ "type": "notified", "members": view }),
+            );
+            return;
+        }
         crate::call_routes::notify_caller(&room, json!({ "type": "ringing", "members": view }));
         watch(edge, engine, room, call_id).await;
     });
@@ -607,12 +698,22 @@ mod tests {
             call_id: "c".into(),
             video: true,
             since_ms: 5,
+            alert: "ring".into(),
         };
         let s = serde_json::to_value(&r).unwrap();
         assert_eq!(
             s,
-            json!({"op":"ring","v":1,"room":"r","call_id":"c","video":true,"since_ms":5})
+            json!({"op":"ring","v":1,"room":"r","call_id":"c","video":true,"since_ms":5,"alert":"ring"})
         );
+        // A ring from a node before `alert` existed reads as a ring.
+        let old: Wire = serde_json::from_value(
+            json!({"op":"ring","v":1,"room":"r","call_id":"c","video":false,"since_ms":5}),
+        )
+        .unwrap();
+        assert!(matches!(old, Wire::Ring { ref alert, .. } if alert == "ring"));
+        assert_eq!(Alert::default_for(4), Alert::Ring);
+        assert_eq!(Alert::default_for(5), Alert::Notify);
+        assert_eq!(Alert::parse("loud"), None);
         let e: Wire = serde_json::from_value(
             json!({"op":"end","v":1,"room":"r","call_id":"c","why":"timeout"}),
         )

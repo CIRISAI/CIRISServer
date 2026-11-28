@@ -643,6 +643,12 @@ struct JoinBody {
     /// `true` to relay.
     #[serde(default)]
     relay: Option<bool>,
+    /// How opening this call alerts the room: `open`, `notify` or `ring`
+    /// (`call_ring::Alert`). Omitted: ring a room of at most
+    /// [`CALL_MAX_PEOPLE`] people, notify a bigger one. Only the opener's
+    /// counts; joining a live call alerts nobody.
+    #[serde(default)]
+    alert: Option<String>,
 }
 
 /// The codecs a video stream (a camera, or a share) is bound to: AV1 under
@@ -741,6 +747,20 @@ async fn join(
             )
         }
     };
+    let asked_alert = match body.alert.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(w) => match crate::call_ring::Alert::parse(w) {
+            Some(a) => Some(a),
+            None => {
+                return refuse_with(
+                    StatusCode::BAD_REQUEST,
+                    "call.alert_unknown",
+                    "That isn't a way of letting the room know about a call.",
+                    json!({ "accepted": ["open", "notify", "ring"] }),
+                )
+            }
+        },
+    };
     let serve_seat = is_serve_seat(&st.engine).await;
     let relay = !serve_seat
         && body
@@ -769,7 +789,7 @@ async fn join(
         );
     }
     let video_ok = video_allowed(people_now);
-    let view = join_view(&st.engine, &room, &call, body.video, false).await;
+    let mut view = join_view(&st.engine, &room, &call, body.video, false).await;
     // Ringing (`call_ring`): this device answering a ring stops it ringing
     // here; a call nobody else is in yet rings the room.
     crate::call_ring::answered_here(&room);
@@ -800,15 +820,24 @@ async fn join(
                 ring_notices: StdMutex::new(Vec::new()),
             }),
         );
-    if first {
+    // The alert mode: the opener's choice, or the room's size.
+    let alert = if first {
+        let in_room = room_people(&st.engine, &room).await.len() + 1;
+        let a = asked_alert.unwrap_or_else(|| crate::call_ring::Alert::default_for(in_room));
         crate::call_ring::start(
             Arc::clone(&st.edge),
             Arc::clone(&st.engine),
             room.clone(),
             call_id,
             body.video,
+            a,
         );
-    }
+        Some(a.token())
+    } else {
+        None
+    };
+    // null: this device joined a call already live, and alerted nobody.
+    view["alert"] = json!(alert);
     if let Some(mine) = current(&room) {
         tokio::spawn(hold_to_call_size(
             Arc::clone(&st.engine),

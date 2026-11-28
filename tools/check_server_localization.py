@@ -737,6 +737,10 @@ KNOWN_UNLOCALIZED: Tuple[str, ...] = (
     # reason other than declined|busy. Queued for client 0.5.244 with its
     # English ("That isn't a reason for declining a call.").
     "call.decline_reason_unknown",
+    # The join's refusal of an alert word other than open|notify|ring (Eric
+    # 2026-11-27: ringing is a choice). Queued with its English ("That isn't a
+    # way of letting the room know about a call.").
+    "call.alert_unknown",
     # PAID AT CLIENT 0.5.243 (2026-11-27, for 0.5.255): call.shaped_only (a
     # shaped-only device's call refusal) and call.full (the four-person call
     # limit); the floor in pyproject.toml is 0.5.243.
