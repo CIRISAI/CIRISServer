@@ -1919,6 +1919,17 @@ AV MEMBER — the production call routes, frames socket and events.
     _, gs = a.api("GET", f"/v1/chat/{room}/call")
     step("call_state", live=(gs or {}).get("live"), room_may_keep=(gs or {}).get("room_may_keep"),
          visible_to_watcher=(gs or {}).get("visible_to_watcher"))
+    # One entry per PERSON for the tiles (client 2026-11-27: three tiles in a
+    # two-person call): alice's view names bob once, with his node.
+    def bob_in_call() -> Any:
+        _, g = a.api("GET", f"/v1/chat/{room}/call")
+        ppl = (((g or {}).get("joined") or {}).get("in_call") or {}).get("people") or []
+        return ppl if any(p.get("person") == b.owner_key_id for p in ppl) else None
+    try:
+        in_call_people = wait_for("alice's call state to name bob", bob_in_call, 30, every=0.5)
+    except Exception:  # noqa: BLE001
+        in_call_people = []
+    step("in_call_people", people=in_call_people)
 
     received = {"alice": {}, "bob": {}}
     vrecv = {"alice": {"frames": 0, "intact": 0, "sizes": set()}, "bob": {"frames": 0, "intact": 0, "sizes": set()}}
@@ -2040,7 +2051,10 @@ AV MEMBER — the production call routes, frames socket and events.
         record["video"] = {"bytes": vbytes, "sent": vsent,
                            "intact_ratio": {"bob_from_alice": round(r_ab, 4), "alice_from_bob": round(r_ba, 4)}}
         video_ok = r_ab >= 0.95 and r_ba >= 0.95
-    ok = (ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
+    one_tile = (len(in_call_people) == 1 and in_call_people[0].get("person") == b.owner_key_id
+                and b.node_key_id in (in_call_people[0].get("nodes") or []))
+    record["in_call_people"] = in_call_people
+    ok = (one_tile and ratio_ab >= 0.99 and ratio_ba >= 0.99 and feats and "chat:call" in feats
           and left_ev.get("person") == b.owner_key_id and ready_ev.get("fragmenting") is video
           and video_ok)
     record["verdict"] = "PASS" if ok else "FAIL"

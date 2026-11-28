@@ -462,6 +462,56 @@ pub async fn room_people(engine: &Engine, room: &str) -> Vec<(String, Vec<String
     out
 }
 
+/// Who is in the call, ONE ENTRY PER PERSON, for a client's tiles
+/// (client 2026-11-27: a two-person call drew three tiles). Edge's `attendees`
+/// is the call's attendance RECORD: the subjects of its rows, which are the
+/// people who joined (attendance is authored by the person), this device's
+/// own person included, and leavers stay. Legs and `attendee_joined` name
+/// NODES. This folds both onto persons:
+/// `{me: {node, person}, people: [{person, nodes, connected}]}`, without this
+/// device's own person. `connected` means a leg to one of their nodes is up.
+pub async fn people_view(
+    engine: &Engine,
+    attendees: &[String],
+    legs: &[String],
+) -> serde_json::Value {
+    let me = crate::node_key::wire_identity()
+        .unwrap_or_default()
+        .to_owned();
+    let my_person = person_of(engine, &me).await;
+    let mut people: Vec<(String, Vec<String>, bool)> = Vec::new();
+    for k in attendees.iter().chain(legs.iter()) {
+        if *k == me {
+            continue;
+        }
+        let owner = person_of(engine, k).await;
+        let person = owner.clone().unwrap_or_else(|| k.clone());
+        if my_person.as_deref() == Some(person.as_str()) {
+            continue;
+        }
+        let node = owner.is_some().then(|| k.clone());
+        let up = legs.contains(k);
+        match people.iter_mut().find(|(p, _, _)| *p == person) {
+            Some((_, nodes, connected)) => {
+                if let Some(n) = node {
+                    if !nodes.contains(&n) {
+                        nodes.push(n);
+                    }
+                }
+                *connected |= up;
+            }
+            None => people.push((person, node.into_iter().collect(), up)),
+        }
+    }
+    json!({
+        "me": { "node": me, "person": my_person },
+        "people": people
+            .into_iter()
+            .map(|(p, n, c)| json!({ "person": p, "nodes": n, "connected": c }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// Whether each other person in `room` can be heard from, as THIS node sees
 /// it: a warning for "you are calling someone whose device is offline", never
 /// a refusal. One entry per person: `{member, person, nodes, in_call,
@@ -881,6 +931,7 @@ async fn join_view(
         "state": state_view(&call.state()),
         "attendees": attendees,
         "attendee_people": people,
+        "in_call": people_view(engine, &attendees, &call.legs()).await,
         "reach": reach_view(engine, room, &attendees).await,
         "legs": call.legs(),
         "relay": relay_view(engine, call, is_serve_seat(engine).await).await,
@@ -1019,6 +1070,7 @@ async fn state(
                 Some(c) => Some(json!({
                     "attendee_people": people_of(&st.engine, &c.attendees().await).await,
                     "reach": reach_view(&st.engine, &room, &c.attendees().await).await,
+                    "in_call": people_view(&st.engine, &c.attendees().await, &c.legs()).await,
                     "stream_id": hex::encode(c.stream().0),
                     "state": state_view(&c.state()),
                     "frame_budget_bytes": c.chunk_plaintext_budget(),
