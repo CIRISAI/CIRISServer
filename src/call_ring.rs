@@ -516,7 +516,10 @@ async fn watch(edge: Arc<Edge>, engine: Arc<Engine>, room: String, call_id: Stri
                 &room,
                 json!({ "type": "no_answer", "why": "timeout" }),
             );
-            // Let the socket's watch loop (250 ms) send it before the call goes.
+            // Then the call's end in words (`call_ended` ended=no_answer):
+            // the node leaves it, so the socket closes after this.
+            crate::call_routes::notify_caller(&room, crate::call_routes::no_answer_ended_json());
+            // Let the socket's watch loop (250 ms) send both before the call goes.
             tokio::time::sleep(Duration::from_millis(600)).await;
             let _ = crate::call_routes::leave_room(&room, "left").await;
             break ("timeout", None);

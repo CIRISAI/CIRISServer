@@ -365,7 +365,8 @@
    "expired": "call.end.expired",
    "shaped_only_no_media": "call.shaped_only",
    "onion_anonymous_no_media": "call.anonymous_mode",
-   "call_full": "call.full"
+   "call_full": "call.full",
+   "no_answer": "call.no_answer"
   }
  },
  "ringing": {
@@ -411,6 +412,6 @@
   ],
   "member_states": ["ringing", "in_call", "busy", "declined", "unreachable", "refused"],
   "timeout_s": 45,
-  "notes": "`ringing` is sent once every member node has answered the ring or failed to (unreachable = no path now or no answer within 8 s; refused = the member's node refused it, e.g. it doesn't hold that room yet; in_call = that node is already in this room's call, two people having joined at once, and it was not rung). `no_answer` why=declined when every member rung declined or is busy (the call stays up; the caller leaves); why=timeout after 45 s with nobody joined, and then the node leaves the call itself (call_ended follows). Someone joining ends the ring everywhere: their own other devices hear answered_elsewhere. Answering is joining the call (POST /v1/chat/{room}/call); it stops this device ringing."
+  "notes": "`ringing` is sent once every member node has answered the ring or failed to (unreachable = no path now or no answer within 8 s; refused = the member's node refused it, e.g. it doesn't hold that room yet; in_call = that node is already in this room's call, two people having joined at once, and it was not rung). `no_answer` why=declined when every member rung declined or is busy (the call stays up; the caller leaves); why=timeout after 45 s with nobody joined, and then the node sends call_ended {ended: no_answer, reason_id: call.no_answer} and leaves the call itself; the socket closes. Someone joining ends the ring everywhere: their own other devices hear answered_elsewhere. Answering is joining the call (POST /v1/chat/{room}/call); it stops this device ringing."
  }
 }

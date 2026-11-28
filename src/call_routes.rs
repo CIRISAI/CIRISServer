@@ -281,6 +281,12 @@ pub fn call_full_json(people: usize) -> serde_json::Value {
             "max_people": CALL_MAX_PEOPLE, "people": people })
 }
 
+/// The server's own end for a call that rang [`crate::call_ring::RING_TIMEOUT`]
+/// with nobody joining: the node leaves it, and the socket says so in words.
+pub fn no_answer_ended_json() -> serde_json::Value {
+    json!({ "type": "call_ended", "ended": "no_answer", "reason_id": "call.no_answer" })
+}
+
 /// Watch a call this node just joined for [`CALL_FULL_WINDOW`]: if it holds
 /// more than [`CALL_MAX_PEOPLE`] people, tell the socket (it sends
 /// [`call_full_json`] and closes) and leave.
@@ -2440,10 +2446,13 @@ mod tests {
                 token: "onion_anonymous_no_media",
             },
         ];
-        // Edge's causes plus the server's own: a call over the four-person limit.
-        assert_eq!(pinned.len(), causes.len() + 1);
+        // Edge's causes plus the server's own: a call over the four-person
+        // limit, and a call that rang with nobody answering.
+        assert_eq!(pinned.len(), causes.len() + 2);
         let full = call_full_json(5);
         assert_eq!(pinned[full["ended"].as_str().unwrap()], full["reason_id"]);
+        let none = no_answer_ended_json();
+        assert_eq!(pinned[none["ended"].as_str().unwrap()], none["reason_id"]);
         for c in &causes {
             let out = ended_json(c);
             assert_eq!(out["type"], "call_ended");
