@@ -56,6 +56,12 @@ use crate::call_frames::{self, Incoming};
 /// The capability word the client's Call action waits for (`chat:call`).
 pub const FEATURE: &str = "chat:call";
 
+/// The capability word for ringing and the opener's alert choice (0.5.255,
+/// `call_ring`): `alert` on the join, `GET /v1/calls/events`, decline. A client
+/// offers "Ring them" only where the node declares it; an older node ignores
+/// `alert` and rings nobody.
+pub const FEATURE_RING: &str = "chat:call:ring";
+
 /// "Live" when a member's attendance row is this recent, or this node is in it.
 const LIVE_WINDOW_SECS: i64 = 60;
 

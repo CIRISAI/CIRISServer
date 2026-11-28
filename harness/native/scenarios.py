@@ -2123,6 +2123,11 @@ AV RING — ring, decline (busy), ring again, answer.
 
     record: dict = {"scenario": "av_ring", "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "versions": _versions(), "bar_s": bar}
+    _, conf = a.api("GET", "/v1/federation/conformance")
+    feats = ((conf or {}).get("data") or conf or {}).get("features") if isinstance(conf, dict) else None
+    step("feature_declared", features=feats)
+    if not feats or "chat:call:ring" not in feats:
+        return fail("ring_not_declared", "the node must declare chat:call:ring", features=feats)
     # 1. Ring, then decline busy.
     t0, ws, got = call_alone()
     if t0 is None:
